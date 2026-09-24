@@ -159,12 +159,14 @@ function itemContents(entry: JsonObject): JsonObject[] {
   return result
 }
 
-function bottomCursor(entries: JsonObject[]): string | null {
+function bottomCursor(entries: JsonObject[]): { value: string | null; stopOnEmptyResponse: boolean } {
   for (const entry of entries) {
     const content = asObject(entry.content)
-    if (content.cursorType === 'Bottom') return string(content.value) || null
+    if (content.cursorType === 'Bottom') {
+      return { value: string(content.value) || null, stopOnEmptyResponse: content.stopOnEmptyResponse === true }
+    }
   }
-  return null
+  return { value: null, stopOnEmptyResponse: false }
 }
 
 function userItem(raw: unknown): MigrationItem | null {
@@ -224,7 +226,8 @@ export function parseTimeline(body: unknown, kind: 'following' | 'bookmarks'): {
       if (parsed) items.push(parsed)
     }
   }
-  return { items, cursor: bottomCursor(entries) }
+  const bottom = bottomCursor(entries)
+  return { items, cursor: items.length === 0 && bottom.stopOnEmptyResponse ? null : bottom.value }
 }
 
 function findOperations(script: string, map: QueryIds): void {
@@ -628,7 +631,7 @@ export class XClient {
     for (let page = 0; page < MAX_PAGES; page++) {
       signal?.throwIfAborted()
       const variables: JsonObject = kind === 'following'
-        ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
+        ? { userId, count: 20, includePromotedContent: false, withGrokTranslatedBio: true }
         : { count: 20, includePromotedContent: false }
       if (cursor) variables.cursor = cursor
       const body = await this.graphqlGet(kind === 'following' ? 'Following' : 'Bookmarks', variables, graphqlFeatures, undefined, signal)
@@ -645,7 +648,7 @@ export class XClient {
       onPage?.(all.length, page + 1)
       if (!result.cursor) return all
       if (stalePages >= MAX_STALE_PAGES) {
-        throw new XApiError(`X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免重复分页。`)
+        throw new XApiError(`X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项。`)
       }
       if (seenCursors.has(result.cursor)) throw new XApiError('X 返回重复分页游标，已停止扫描以避免遗漏数据。')
       seenCursors.add(result.cursor)

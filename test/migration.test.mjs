@@ -60,7 +60,7 @@ test('解析 X 时间线中的用户、推文和底部分页游标', () => {
         core: { user_results: { result: { core: { screen_name: 'author' } } } },
       },
     } } } } },
-    { content: { cursorType: 'Bottom', value: 'next-bookmarks' } },
+    { content: { cursorType: 'Bottom', value: 'next-bookmarks', stopOnEmptyResponse: true } },
   ]
   const bookmarksResponse = {
     data: { bookmark_timeline_v2: { timeline: {
@@ -71,6 +71,46 @@ test('解析 X 时间线中的用户、推文和底部分页游标', () => {
   assert.equal(bookmarks.items[0].id, '401')
   assert.equal(bookmarks.items[0].label, 'saved text')
   assert.equal(bookmarks.cursor, 'next-bookmarks')
+
+  const terminalEntries = [
+    { content: { cursorType: 'Top', value: 'previous' } },
+    { content: { cursorType: 'Bottom', value: 'same-cursor', stopOnEmptyResponse: true } },
+  ]
+  const terminalBookmarks = {
+    data: { bookmark_timeline_v2: { timeline: {
+      instructions: [{ type: 'TimelineAddEntries', entries: terminalEntries }],
+    } } },
+  }
+  const terminalFollowing = {
+    data: { user: { result: { timeline: { timeline: {
+      instructions: [{ type: 'TimelineAddEntries', entries: terminalEntries }],
+    } } } } },
+  }
+  assert.deepEqual(parseTimeline(terminalBookmarks, 'bookmarks'), { items: [], cursor: null })
+  assert.deepEqual(parseTimeline(terminalFollowing, 'following'), { items: [], cursor: null })
+})
+
+test('收藏空页带停止标记时结束分页', async () => {
+  const client = new XClient('fake', 'fake', {}, {})
+  let requests = 0
+  client.graphqlGet = async () => {
+    requests++
+    const entries = requests === 1
+      ? [
+          { content: { itemContent: { tweet_results: { result: {
+            rest_id: '401', legacy: { full_text: 'saved text' },
+          } } } } },
+          { content: { cursorType: 'Bottom', value: 'last-cursor' } },
+        ]
+      : [{ content: { cursorType: 'Bottom', value: 'last-cursor', stopOnEmptyResponse: true } }]
+    return { data: { bookmark_timeline_v2: { timeline: {
+      instructions: [{ type: 'TimelineAddEntries', entries }],
+    } } } }
+  }
+  const items = await client.bookmarks()
+  assert.equal(requests, 2)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].id, '401')
 })
 
 async function post(path, body) {
@@ -223,11 +263,14 @@ test('刷新可读取会话，停止扫描会立即中断当前读取', async ()
 test('连续无新增项目时安全停止分页', async () => {
   const client = new XClient('fake', 'fake', {}, {})
   let page = 0
-  client.graphqlGet = async () => ({
-    data: { user: { result: { timeline: { timeline: {
-      instructions: [{ entries: [{ content: { cursorType: 'Bottom', value: `cursor-${++page}` } }] }],
-    } } } } },
-  })
+  client.graphqlGet = async (_operation, variables) => {
+    assert.equal(variables.count, 20)
+    return {
+      data: { user: { result: { timeline: { timeline: {
+        instructions: [{ entries: [{ content: { cursorType: 'Bottom', value: `cursor-${++page}` } }] }],
+      } } } } },
+    }
+  }
   await assert.rejects(() => client.following(sourceAccount), /连续 10 页未返回新的关注项目/)
   assert.equal(page, 10)
 })
