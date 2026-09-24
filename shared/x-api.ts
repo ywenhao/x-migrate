@@ -1,7 +1,26 @@
 import { ClientTransaction } from 'x-client-transaction-id'
-function sleep(ms: number, signal?: AbortSignal): Promise<void> { return new Promise((resolve, reject) => { const timer = setTimeout(resolve, ms); signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason) }, { once: true }) }) }
 import { parseHTML } from 'linkedom'
 import features from './features.json' with { type: 'json' }
+import { readCompleteList } from './pagination.ts'
+
+export type Fetcher = (url: string, init?: RequestInit) => Promise<Response>
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason)
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    const abort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      reject(signal?.reason)
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
 
 const X_ORIGIN = 'https://x.com'
 const ASSET_ORIGIN = 'https://abs.twimg.com'
@@ -16,8 +35,6 @@ const OPERATIONS = new Set([
   'DeleteBookmark',
 ])
 const DISCOVERY_TTL = 60 * 60 * 1000
-const MAX_PAGES = 500
-const MAX_STALE_PAGES = 10
 const MAX_ASSETS = 45
 const SCAN_REQUEST_GAP_MS = 2_000
 // X 的完整 feature 快照有数百项。时间线请求只发送这些字段，
@@ -399,23 +416,29 @@ export function validateQueryIds(input: unknown): QueryIds {
 export class XClient {
   private transactionPromise: Promise<ClientTransaction | null> | null = null
   private lastScanRequestFinishedAt = 0
-  private constructor(
+  private discoveryFiles = new Map<string, Promise<string>>()
+  private discoveryAssetFetches = 0
+  constructor(
     private readonly authToken: string,
     private readonly ct0: string,
     private readonly overrides: QueryIds,
-  ) {
-  }
+    private readonly request: Fetcher = fetch,
+    private readonly onClose: () => Promise<void> = async () => {},
+  ) {}
 
   static async create(
     authToken: string,
     ct0: string,
-    _proxy: string,
     overrides: QueryIds,
+    request: Fetcher = fetch,
+    onClose: () => Promise<void> = async () => {},
   ): Promise<XClient> {
-    return new XClient(authToken, ct0, overrides)
+    return new XClient(authToken, ct0, overrides, request, onClose)
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    await this.onClose()
+  }
 
   private headers(json = false): Record<string, string> {
     return {
@@ -495,7 +518,7 @@ export class XClient {
       ? await this.signedHeaders(method, path, body !== undefined)
       : this.headers(body !== undefined)
     signal?.throwIfAborted()
-    const response = await fetch(`${X_ORIGIN}${path}`, {
+    const response = await this.request(`${X_ORIGIN}${path}`, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -702,7 +725,7 @@ export class XClient {
   }
 
   private async text(url: string, authenticated: boolean): Promise<string> {
-    const response = await fetch(url, {
+    const response = await this.request(url, {
       method: 'GET',
       headers: authenticated ? this.headers() : { accept: '*/*' },
     })
@@ -717,12 +740,26 @@ export class XClient {
     return await response.text()
   }
 
-  private async discover(): Promise<QueryIds> {
-    if (Date.now() - discoveredAt < DISCOVERY_TTL) return discoveredIds
-    const found: QueryIds = {}
+  private discoveryText(url: string): Promise<string> {
+    let result = this.discoveryFiles.get(url)
+    if (!result) {
+      if (url !== `${X_ORIGIN}/home`) {
+        if (this.discoveryAssetFetches >= MAX_ASSETS)
+          return Promise.reject(new Error('Asset limit'))
+        this.discoveryAssetFetches++
+      }
+      result = this.text(url, false)
+      this.discoveryFiles.set(url, result)
+    }
+    return result
+  }
+
+  private async discover(wanted: Operation): Promise<QueryIds> {
+    const found: QueryIds = Date.now() - discoveredAt < DISCOVERY_TTL ? { ...discoveredIds } : {}
+    if (found[wanted]) return found
     // Script IDs are public; sending account cookies to the HTML page can
     // make X reject this discovery request even when its API session works.
-    const html = await this.text(`${X_ORIGIN}/home`, false)
+    const html = await this.discoveryText(`${X_ORIGIN}/home`)
     findOperations(html, found)
     const queue = [...new Set([...scriptUrls(html), ...runtimeChunkUrls(html)])].sort((a, b) => {
       const priority = (url: string) => {
@@ -734,16 +771,12 @@ export class XClient {
       return priority(a) - priority(b)
     })
     const seen = new Set<string>()
-    while (
-      queue.length > 0 &&
-      seen.size < MAX_ASSETS &&
-      Object.keys(found).length < OPERATIONS.size
-    ) {
+    while (queue.length > 0 && seen.size < MAX_ASSETS && !found[wanted]) {
       const url = queue.shift()!
       if (seen.has(url)) continue
       seen.add(url)
       try {
-        const script = await this.text(url, false)
+        const script = await this.discoveryText(url)
         findOperations(script, found)
         for (const nested of scriptUrls(script)) if (!seen.has(nested)) queue.push(nested)
       } catch {
@@ -757,14 +790,14 @@ export class XClient {
 
   private async operationId(operation: Operation): Promise<string> {
     if (this.overrides[operation]) return this.overrides[operation]!
-    const ids = await this.discover()
+    const ids = await this.discover(operation)
     const id = ids[operation]
     if (!id) {
       throw new XApiError(
-        `未找到 ${operation} 查询 ID。请在“高级设置”中从 X 网页 Network 请求填入该操作的 ID 后重新连接。`,
+        `未找到 ${operation} 查询 ID。请在“高级设置”中从 X 网页 Network 请求填入该操作的 ID 后重试。`,
         undefined,
         null,
-        `Could not find the ${operation} query ID. Copy it from the matching X Network request into Advanced settings and reconnect.`,
+        `Could not find the ${operation} query ID. Copy it from the matching X Network request into Advanced settings and retry.`,
       )
     }
     return id
@@ -841,73 +874,12 @@ export class XClient {
     signal?: AbortSignal,
     expectedCount?: number | null,
   ): Promise<MigrationItem[]> {
-    const all: MigrationItem[] = []
-    const seenIds = new Set<string>()
-    const seenCursors = new Set<string>()
-    let cursor: string | null = null
-    let stalePages = 0
-    for (let page = 0; page < MAX_PAGES; page++) {
-      signal?.throwIfAborted()
-      const variables: JsonObject =
-        kind === 'following'
-          ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
-          : { count: 20, includePromotedContent: false }
-      if (cursor) variables.cursor = cursor
-      const body = await this.graphqlGet(
-        kind === 'following' ? 'Following' : 'Bookmarks',
-        variables,
-        graphqlFeatures,
-        undefined,
-        signal,
-      )
-      signal?.throwIfAborted()
-      const result = parseTimeline(body, kind)
-      const previousCount = all.length
-      for (const item of result.items) {
-        if (!seenIds.has(item.id)) {
-          seenIds.add(item.id)
-          all.push(item)
-        }
-      }
-      stalePages = all.length === previousCount ? stalePages + 1 : 0
-      const repeatedCursor = !!result.cursor && seenCursors.has(result.cursor)
-      const knownFollowingCount =
-        kind === 'following' && expectedCount !== null && expectedCount !== undefined
-      const inferredEnd =
-        !!result.cursor &&
-        !knownFollowingCount &&
-        (stalePages >= 2 || (repeatedCursor && stalePages >= 1))
-      onPage?.(all.length, page + 1, inferredEnd)
-      if (!result.cursor) return all
-      if (knownFollowingCount && all.length === expectedCount && stalePages >= 1) return all
-      if (inferredEnd) return all
-      if (stalePages >= MAX_STALE_PAGES) {
-        const expected =
-          kind === 'following' && expectedCount !== null && expectedCount !== undefined
-            ? `，账号资料显示总关注 ${expectedCount} 项`
-            : ''
-        throw new XApiError(
-          `X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项${expected}。`,
-          undefined,
-          null,
-          `X returned no new ${kind === 'following' ? 'follows' : 'bookmarks'} for ${MAX_STALE_PAGES} pages. Scanning stopped to avoid missing data. Page ${page + 1} returned ${result.items.length}; ${all.length} read in total${expectedCount === null || expectedCount === undefined ? '' : `; profile count: ${expectedCount}`}.`,
-        )
-      }
-      if (repeatedCursor)
-        throw new XApiError(
-          'X 返回重复分页游标，已停止扫描以避免遗漏数据。',
-          undefined,
-          null,
-          'X returned a repeated page cursor. Scanning stopped to avoid missing data.',
-        )
-      seenCursors.add(result.cursor)
-      cursor = result.cursor
-    }
-    throw new XApiError(
-      '列表超过 500 页，已停止扫描以避免只迁移部分数据。',
-      undefined,
-      null,
-      'The list exceeds 500 pages. Scanning stopped to avoid a partial transfer.',
+    return readCompleteList(
+      kind,
+      expectedCount ?? null,
+      (cursor) => this.page(kind, userId, cursor, signal),
+      onPage,
+      signal,
     )
   }
 
@@ -949,7 +921,7 @@ export class XClient {
 
   private async friendship(action: 'create' | 'destroy', userId: string): Promise<void> {
     const path = `/i/api/1.1/friendships/${action}.json`
-    const response = await fetch(`${X_ORIGIN}${path}`, {
+    const response = await this.request(`${X_ORIGIN}${path}`, {
       method: 'POST',
       headers: {
         ...(await this.signedHeaders('POST', path)),

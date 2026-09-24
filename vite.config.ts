@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     // Vue 3.6 Vapor 模式：SFC 内使用 <script setup vapor> 即自动启用
     vue(),
-    // 本地 API 中间件（开发 + 预览都挂载 /api），负责代理请求 X 内部接口
+    // 本地开发和预览使用与 Worker 相同的 Hono API 路由。
     xApiPlugin(),
   ],
   server: {

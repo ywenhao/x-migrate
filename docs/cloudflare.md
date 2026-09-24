@@ -1,35 +1,24 @@
-# Cloudflare Worker + Node API
+# Single Cloudflare Worker
 
 [English](cloudflare.md) · [简体中文](cloudflare.zh-CN.md) · [Back to README](../README.md)
 
-The Worker serves the built page and forwards `/api/*` to a separate Node process. X requests, cookie sessions, and migration jobs stay in Node memory. The Worker uses native `fetch`; it does not use `HTTP_PROXY`.
+The Worker serves the Vue build and handles `/api/*` in the same deployment. It calls X directly; no Node API, `API_ORIGIN`, `API_PROXY_SECRET`, database, or Worker KV binding is required.
 
 ## Before deploying
 
-The default `workers.dev` page is public. **Protect it with Cloudflare Access or another visitor authentication layer before entering X cookies.** The shared secret below authenticates Worker-to-Node requests only. It does not restrict who can use the web page. Keep the Node API behind HTTPS and do not expose it without the shared secret.
+The default `workers.dev` page is public. **Protect the site with Cloudflare Access or another visitor authentication layer before entering X cookies.** The browser keeps the X cookies and migration state in this tab's `sessionStorage`. Each API request sends the relevant cookie values to the Worker, which uses them for one X operation or list page. Closing the tab clears the saved session.
 
-## Configure Node
+## Deploy
 
-1. On a host that stays online, install Node.js 24 and run `pnpm install --frozen-lockfile`.
-2. Set `X_MIGRATE_PROXY_SECRET` to a random string of at least 32 characters. Do not commit it. Optionally set `X_MIGRATE_API_HOST` and `X_MIGRATE_API_PORT`; defaults are `127.0.0.1` and `5198`.
-3. Run `pnpm run api`. Put an HTTPS reverse proxy in front of the API, for example `https://api.example.com`.
-
-## Configure Worker
-
-1. Add `"vars": { "API_ORIGIN": "https://api.example.com" }` to `wrangler.jsonc`, using your Node API address. `API_ORIGIN` is a normal address configuration, not a proxy URL or a secret.
-2. Run `pnpm exec wrangler login`, then `pnpm exec wrangler secret put API_PROXY_SECRET`. Enter the same value as `X_MIGRATE_PROXY_SECRET`.
-3. Run `pnpm run cf:dry-run` to check the bundle, then `pnpm run cf:deploy` to publish.
+1. Install Node.js 24 and pnpm, then run `pnpm install --frozen-lockfile`.
+2. Run `pnpm run cf:dry-run` to build and check the Worker bundle without publishing.
+3. Sign in with `pnpm exec wrangler login`, then run `pnpm run cf:deploy`.
 4. Configure visitor access for the Worker hostname before using real X sessions.
 
-Without the origin or secret, the Worker API returns 503. Node validates the shared secret, and the Worker rejects API requests with a foreign `Origin`.
+`wrangler.jsonc` already points to `worker/index.ts` and the `dist` asset directory. No deployment variables or secrets are needed for this architecture.
 
 ## Local Worker preview
 
-Start the Node API first. Put the following values in an untracked `.dev.vars` file, then run `pnpm run cf:dev`:
+Run `pnpm run cf:dev`. Wrangler builds the same Vue app and starts the same API routes locally. A separate Node API is not needed.
 
-```dotenv
-API_ORIGIN=http://127.0.0.1:5198
-API_PROXY_SECRET=replace-with-the-same-local-secret
-```
-
-`pnpm run cf:dry-run` checks packaging without deploying. Restarting Node clears all sessions and jobs; users then need to reconnect and scan again.
+The Worker uses Cloudflare's network path to reach X and does not support a local HTTP proxy. Node deployments can use `X_MIGRATE_PROXY` or standard proxy environment variables, as described in the README. The dry run checks packaging; it does not verify access to X or perform account actions.

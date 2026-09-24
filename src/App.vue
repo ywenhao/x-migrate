@@ -422,7 +422,10 @@ const {
           <div v-if="job.stage === 'paused'" class="status-panel pause-panel">
             <div>
               <strong>{{ t('ratePaused') }}</strong>
-              <p>{{ t('autoResume', { message: job.message, time: retryCountdown }) }}</p>
+              <p v-if="job.retryAt">
+                {{ t('autoResume', { message: job.message, time: retryCountdown }) }}
+              </p>
+              <p v-else>{{ job.message }}</p>
             </div>
             <button class="text-button" type="button" :disabled="busy" @click="resume">
               {{ t('resume') }}</button
