@@ -2,493 +2,210 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { cookiesFromCurl } from './curl'
 import { saveLocale, type Locale } from './i18n'
-import type {
-  AccountView,
-  ItemView,
-  ItemsPage,
-  JobView,
-  MigrationKind,
-  ScanListProgress,
-} from './types'
+import type { AccountView, ItemView, JobView, MigrationKind, ScanListProgress } from './types'
 
 export function useMigration() {
   const { locale, t } = useI18n()
-  function setLocale(next: Locale): void {
-    locale.value = next
-    saveLocale(next)
-    if (job.value) void poll()
-  }
-
   type Role = 'source' | 'target'
-  interface Connection {
-    sessionId: string
-    account: AccountView
-  }
-  const SESSION_STORAGE_KEY = 'x-migrate.session.v1'
-
-  const credentials = reactive({
-    source: { authToken: '', ct0: '' },
-    target: { authToken: '', ct0: '' },
-  })
+  interface Credentials { authToken: string; ct0: string }
+  interface Connection { sessionId: string; account: AccountView }
+  const STORAGE_KEY = 'x-migrate.browser.v2'
+  const credentials = reactive<Record<Role, Credentials>>({ source: { authToken: '', ct0: '' }, target: { authToken: '', ct0: '' } })
+  const connections = reactive<Record<Role, Connection | null>>({ source: null, target: null })
   const curlInput = reactive<Record<Role, string>>({ source: '', target: '' })
   const curlMessage = reactive<Record<Role, string>>({ source: '', target: '' })
   const curlInvalid = reactive<Record<Role, boolean>>({ source: false, target: false })
-  const connections = reactive<Record<Role, Connection | null>>({ source: null, target: null })
   const connecting = ref<Role | null>(null)
   const proxy = ref('')
-  const queryIds = reactive({
-    Viewer: '',
-    UserByScreenName: '',
-    Following: '',
-    Bookmarks: '',
-    CreateBookmark: '',
-    DeleteBookmark: '',
-  })
+  const queryIds = reactive({ Viewer: '', UserByScreenName: '', Following: '', Bookmarks: '', CreateBookmark: '', DeleteBookmark: '' })
   const selected = reactive({ following: true, bookmarks: true })
   const removeSource = reactive({ following: false, bookmarks: false })
   const removeConfirmation = ref('')
   const job = ref<JobView | null>(null)
   const previewKind = ref<MigrationKind>('following')
   const previewItems = reactive<Record<MigrationKind, ItemView[]>>({ following: [], bookmarks: [] })
-  const chosenIds = reactive<Record<MigrationKind, Set<string>>>({
-    following: new Set(),
-    bookmarks: new Set(),
-  })
+  const chosenIds = reactive<Record<MigrationKind, Set<string>>>({ following: new Set(), bookmarks: new Set() })
   const loadingItems = reactive({ following: false, bookmarks: false })
   const busy = ref(false)
   const error = ref('')
   const clockNow = ref(Date.now())
-  let timer: ReturnType<typeof setInterval> | null = null
-  let polling = false
+  let clockTimer: ReturnType<typeof setInterval> | null = null
+  let cancelled = false
 
   const bothConnected = computed(() => !!connections.source && !!connections.target)
-  const sameAccount = computed(
-    () =>
-      !!connections.source &&
-      !!connections.target &&
-      connections.source.account.id === connections.target.account.id,
-  )
-  const taskActive = computed(
-    () =>
-      job.value?.stage === 'scanning' ||
-      job.value?.stage === 'running' ||
-      job.value?.stage === 'paused',
-  )
+  const sameAccount = computed(() => !!connections.source && !!connections.target && connections.source.account.id === connections.target.account.id)
+  const taskActive = computed(() => ['scanning', 'running', 'paused'].includes(job.value?.stage || ''))
   const chosenCount = computed(() => chosenIds.following.size + chosenIds.bookmarks.size)
-  const previewComplete = computed(
-    () =>
-      !job.value ||
-      (['following', 'bookmarks'] as const).every(
-        (kind) =>
-          !job.value?.selected[kind] ||
-          previewItems[kind].length === job.value.summary[kind].source,
-      ),
-  )
+  const previewComplete = computed(() => !job.value || (['following', 'bookmarks'] as const).every((kind) => !job.value?.selected[kind] || previewItems[kind].length === job.value.summary[kind].source))
   const wantsRemoval = computed(() => removeSource.following || removeSource.bookmarks)
-  const removalConfirmed = computed(
-    () =>
-      !wantsRemoval.value || removeConfirmation.value === `@${job.value?.source.screenName ?? ''}`,
-  )
-  const selectionMatchesJob = computed(
-    () =>
-      !!job.value &&
-      selected.following === job.value.selected.following &&
-      selected.bookmarks === job.value.selected.bookmarks,
-  )
-  const percentage = computed(() => {
-    const progress = job.value?.progress
-    return progress?.total ? Math.round((progress.processed / progress.total) * 100) : 0
-  })
-  const retryCountdown = computed(() => {
-    const remaining = Math.max(0, Math.ceil(((job.value?.retryAt ?? 0) - clockNow.value) / 1000))
-    return t('minutesSeconds', { minutes: Math.floor(remaining / 60), seconds: remaining % 60 })
-  })
+  const removalConfirmed = computed(() => !wantsRemoval.value || removeConfirmation.value === `@${job.value?.source.screenName ?? ''}`)
+  const selectionMatchesJob = computed(() => !!job.value && selected.following === job.value.selected.following && selected.bookmarks === job.value.selected.bookmarks)
+  const percentage = computed(() => job.value?.progress.total ? Math.round((job.value.progress.processed / job.value.progress.total) * 100) : 0)
+  const retryCountdown = computed(() => { const n = Math.max(0, Math.ceil(((job.value?.retryAt ?? 0) - clockNow.value) / 1000)); return t('minutesSeconds', { minutes: Math.floor(n / 60), seconds: n % 60 }) })
 
-  function scanCount(progress: ScanListProgress): string {
-    return `${progress.read} / ${progress.total ?? t('afterScan')}`
-  }
-
-  function persistSession(): void {
-    const saved = {
-      source: connections.source?.sessionId ?? null,
-      target: connections.target?.sessionId ?? null,
-      jobId: job.value?.id ?? null,
-    }
+  function persist(): void {
     try {
-      if (saved.source || saved.target || saved.jobId)
-        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved))
-      else sessionStorage.removeItem(SESSION_STORAGE_KEY)
-    } catch {
-      /* The app still works when browser storage is unavailable. */
-    }
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ credentials, connections, queryIds, selected, removeSource, job: job.value, previewItems, chosenIds: { following: [...chosenIds.following], bookmarks: [...chosenIds.bookmarks] } }))
+    } catch { /* Storage is optional. */ }
   }
-
-  async function api<T>(path: string, body?: unknown): Promise<T> {
-    const response = await fetch(`/api${path}`, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: {
-        'accept-language': locale.value,
-        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: 'no-store',
-    })
+  function restore(): boolean {
+    try {
+      const raw = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || 'null') as any
+      if (!raw) return false
+      for (const role of ['source', 'target'] as const) {
+        if (raw.credentials?.[role]) Object.assign(credentials[role], raw.credentials[role])
+        if (raw.connections?.[role]) connections[role] = raw.connections[role]
+      }
+      if (raw.queryIds) Object.assign(queryIds, raw.queryIds)
+      if (raw.selected) Object.assign(selected, raw.selected)
+      if (raw.removeSource) Object.assign(removeSource, raw.removeSource)
+      if (raw.job) job.value = raw.job
+      if (raw.previewItems) {
+        previewItems.following = raw.previewItems.following || []
+        previewItems.bookmarks = raw.previewItems.bookmarks || []
+      }
+      if (raw.chosenIds) {
+        chosenIds.following = new Set(raw.chosenIds.following || [])
+        chosenIds.bookmarks = new Set(raw.chosenIds.bookmarks || [])
+      }
+      if (job.value) previewKind.value = job.value.selected.following ? 'following' : 'bookmarks'
+      return true
+    } catch { return false }
+  }
+  function showError(cause: unknown): void { error.value = cause instanceof Error ? cause.message : t('unknownError') }
+  function parseCurl(role: Role): boolean {
+    const cookies = cookiesFromCurl(curlInput[role])
+    credentials[role].authToken = ''; credentials[role].ct0 = ''
+    if (!cookies) { curlInvalid[role] = true; curlMessage[role] = 'curlInvalid'; return false }
+    credentials[role].authToken = cookies.authToken; credentials[role].ct0 = cookies.ct0
+    curlInput[role] = ''; curlInvalid[role] = false; curlMessage[role] = 'curlParsed'; return true
+  }
+  async function api<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+    const response = await fetch(`/api${path}`, { method: 'POST', headers: { 'accept-language': locale.value, 'content-type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' })
     const data = (await response.json()) as T & { error?: string }
     if (!response.ok) throw new Error(data.error || t('requestFailed', { status: response.status }))
     return data
   }
-
-  async function restoreSession(): Promise<void> {
-    let saved: Record<string, unknown>
-    try {
-      saved = JSON.parse(sessionStorage.getItem(SESSION_STORAGE_KEY) || 'null') as Record<
-        string,
-        unknown
-      >
-    } catch {
-      return
-    }
-    if (!saved || typeof saved !== 'object') return
-
-    for (const role of ['source', 'target'] as const) {
-      const sessionId = saved[role]
-      if (typeof sessionId !== 'string' || !/^[a-f\d-]{36}$/.test(sessionId)) continue
-      try {
-        const connection = await api<Connection>(`/sessions/${sessionId}`)
-        if (!connections[role]) connections[role] = connection
-      } catch {
-        /* The server process may have restarted or the session expired. */
-      }
-    }
-
-    const jobId = saved.jobId
-    if (
-      connections.source &&
-      connections.target &&
-      connections.source.sessionId === saved.source &&
-      connections.target.sessionId === saved.target &&
-      typeof jobId === 'string' &&
-      /^[a-f\d-]{36}$/.test(jobId)
-    ) {
-      try {
-        const data = await api<{ job: JobView }>(`/jobs/${jobId}`)
-        if (
-          !job.value &&
-          data.job.source.id === connections.source.account.id &&
-          data.job.target.id === connections.target.account.id
-        ) {
-          job.value = data.job
-          selected.following = data.job.selected.following
-          selected.bookmarks = data.job.selected.bookmarks
-          removeSource.following = data.job.removeSource.following
-          removeSource.bookmarks = data.job.removeSource.bookmarks
-          previewKind.value = data.job.selected.following ? 'following' : 'bookmarks'
-          if (
-            data.job.stage === 'scanning' ||
-            data.job.stage === 'running' ||
-            data.job.stage === 'paused'
-          )
-            startPolling()
-          if (data.job.stage !== 'scanning') {
-            await Promise.all(
-              (['following', 'bookmarks'] as const)
-                .filter((kind) => data.job.selected[kind])
-                .map((kind) => loadItems(kind)),
-            )
-          }
-        }
-      } catch {
-        /* An expired job can be scanned again. */
-      }
-    }
-    persistSession()
+  async function withCredentials<T>(role: Role, path: string, body: Record<string, unknown> = {}): Promise<T> {
+    return api<T>(path, { ...body, authToken: credentials[role].authToken, ct0: credentials[role].ct0, queryIds })
   }
-
-  function showError(cause: unknown): void {
-    error.value = cause instanceof Error ? cause.message : t('unknownError')
-  }
-
-  function parseCurl(role: Role): boolean {
-    const cookies = cookiesFromCurl(curlInput[role])
-    credentials[role].authToken = ''
-    credentials[role].ct0 = ''
-    if (cookies) {
-      credentials[role].authToken = cookies.authToken
-      credentials[role].ct0 = cookies.ct0
-      curlInput[role] = ''
-      curlInvalid[role] = false
-      curlMessage[role] = 'curlParsed'
-      return true
-    }
-
-    curlInvalid[role] = true
-    curlMessage[role] = 'curlInvalid'
-    return false
-  }
-
   async function connect(role: Role): Promise<void> {
     error.value = ''
     if (curlInput[role].trim() && !parseCurl(role)) return
+    if (!credentials[role].authToken || !credentials[role].ct0) { showError(new Error(t('requestFailed', { status: 400 }))); return }
     connecting.value = role
     try {
-      const data = await api<{ sessionId: string; account: AccountView }>('/connect', {
-        authToken: credentials[role].authToken,
-        ct0: credentials[role].ct0,
-        proxy: proxy.value,
-        queryIds,
-      })
-      connections[role] = data
-      credentials[role].authToken = ''
-      credentials[role].ct0 = ''
-      curlMessage[role] = ''
-      job.value = null
-      chosenIds.following.clear()
-      chosenIds.bookmarks.clear()
-      persistSession()
-    } catch (cause) {
-      showError(cause)
-    } finally {
-      connecting.value = null
-    }
+      const data = await withCredentials<{ account: AccountView }>(role, '/connect')
+      connections[role] = { sessionId: crypto.randomUUID(), account: data.account }
+      job.value = null; previewItems.following = []; previewItems.bookmarks = []; chosenIds.following.clear(); chosenIds.bookmarks.clear()
+      persist()
+    } catch (cause) { showError(cause) } finally { connecting.value = null }
   }
-
   async function disconnect(role: Role): Promise<void> {
-    const connection = connections[role]
-    if (!connection) return
-    error.value = ''
-    try {
-      await api('/disconnect', { sessionId: connection.sessionId })
-      connections[role] = null
-      job.value = null
-      chosenIds.following.clear()
-      chosenIds.bookmarks.clear()
-      stopPolling()
-      persistSession()
-    } catch (cause) {
-      showError(cause)
+    connections[role] = null; job.value = null; previewItems.following = []; previewItems.bookmarks = []; chosenIds.following.clear(); chosenIds.bookmarks.clear(); persist()
+  }
+  function scanCount(progress: ScanListProgress): string { return `${progress.read} / ${progress.total ?? t('afterScan')}` }
+  function makeProgress(total: number | null = null): ScanListProgress { return { read: 0, total, page: 0, done: false } }
+  function newJob(): JobView {
+    return {
+      id: crypto.randomUUID(), stage: 'scanning', message: t('scanning'),
+      source: connections.source!.account, target: connections.target!.account,
+      selected: { following: selected.following, bookmarks: selected.bookmarks },
+      scanProgress: { following: { source: makeProgress(connections.source!.account.followingCount), target: makeProgress(null) }, bookmarks: { source: makeProgress(null), target: makeProgress(null) } },
+      summary: { following: { source: 0, alreadyThere: 0, toCopy: 0 }, bookmarks: { source: 0, alreadyThere: 0, toCopy: 0 } },
+      progress: { processed: 0, total: 0, copied: 0, alreadyThere: 0, removed: 0, failed: 0 }, retryAt: null, errors: [], removeSource: { following: false, bookmarks: false },
     }
   }
-
-  function stopPolling(): void {
-    if (timer) clearInterval(timer)
-    timer = null
-  }
-
-  async function poll(): Promise<void> {
-    if (!job.value || polling) return
-    clockNow.value = Date.now()
-    polling = true
-    try {
-      const previous = job.value.stage
-      const data = await api<{ job: JobView }>(`/jobs/${job.value.id}`)
-      if (!job.value || job.value.id !== data.job.id || job.value.stage === 'cancelled') return
-      job.value = data.job
-      if (data.job.stage === 'ready' && previous !== 'ready') {
-        stopPolling()
-        await Promise.all(
-          (['following', 'bookmarks'] as const)
-            .filter((kind) => data.job.selected[kind])
-            .map((kind) => loadItems(kind)),
-        )
-      } else if (['completed', 'cancelled', 'failed'].includes(data.job.stage)) {
-        stopPolling()
-      }
-    } catch (cause) {
-      stopPolling()
-      showError(cause)
-    } finally {
-      polling = false
+  async function scanList(role: Role, kind: MigrationKind, userId?: string): Promise<ItemView[]> {
+    const items: ItemView[] = []
+    let cursor: string | null = null
+    const seen = new Set<string>()
+    for (let page = 1; page <= 500; page++) {
+      if (cancelled) throw new Error(t('unknownError'))
+      const data = await withCredentials<{ items: ItemView[]; cursor: string | null }>(role, '/page', { kind, userId, cursor })
+      for (const item of data.items) if (!seen.has(item.id)) { seen.add(item.id); items.push({ ...item, alreadyThere: false }) }
+      const progress = job.value!.scanProgress[kind][role]
+      progress.read = items.length; progress.page = page
+      if (!data.cursor) break
+      if (data.items.length === 0) break
+      cursor = data.cursor
+      if (page === 500) throw new Error('The list exceeds 500 pages.')
     }
+    return items
   }
-
-  function startPolling(): void {
-    stopPolling()
-    timer = setInterval(() => {
-      void poll()
-    }, 2500)
-    void poll()
-  }
-
   async function scan(): Promise<void> {
-    if (!connections.source || !connections.target) return
-    error.value = ''
-    busy.value = true
+    if (!connections.source || !connections.target || sameAccount.value || taskActive.value) return
+    error.value = ''; busy.value = true; cancelled = false
+    removeSource.following = false; removeSource.bookmarks = false; removeConfirmation.value = ''
+    chosenIds.following.clear(); chosenIds.bookmarks.clear(); previewItems.following = []; previewItems.bookmarks = []
+    job.value = newJob(); persist()
     try {
-      removeSource.following = false
-      removeSource.bookmarks = false
-      removeConfirmation.value = ''
-      previewItems.following = []
-      previewItems.bookmarks = []
-      chosenIds.following.clear()
-      chosenIds.bookmarks.clear()
-      const data = await api<{ job: JobView }>('/scan', {
-        sourceSessionId: connections.source.sessionId,
-        targetSessionId: connections.target.sessionId,
-        following: selected.following,
-        bookmarks: selected.bookmarks,
-      })
-      job.value = data.job
+      for (const kind of ['following', 'bookmarks'] as const) {
+        if (!selected[kind]) continue
+        job.value.message = `${kind === 'following' ? '正在读取旧账号关注…' : '正在读取旧账号收藏…'}`; persist()
+        const source = await scanList('source', kind, kind === 'following' ? connections.source.account.id : undefined)
+        if (cancelled) return
+        job.value.message = `${kind === 'following' ? '正在读取新账号关注…' : '正在读取新账号收藏…'}`
+        const target = await scanList('target', kind, kind === 'following' ? connections.target.account.id : undefined)
+        const targetIds = new Set(target.map((item) => item.id))
+        source.forEach((item) => { item.alreadyThere = targetIds.has(item.id) })
+        previewItems[kind] = source
+        job.value.summary[kind] = { source: source.length, alreadyThere: source.filter((x) => x.alreadyThere).length, toCopy: source.filter((x) => !x.alreadyThere).length }
+        job.value.scanProgress[kind].source.total = source.length; job.value.scanProgress[kind].source.done = true
+        job.value.scanProgress[kind].target.total = target.length; job.value.scanProgress[kind].target.done = true
+        persist()
+      }
+      job.value.stage = 'ready'; job.value.message = t('scanComplete'); persist()
       previewKind.value = selected.following ? 'following' : 'bookmarks'
-      persistSession()
-      startPolling()
     } catch (cause) {
-      showError(cause)
-    } finally {
-      busy.value = false
-    }
+      job.value.stage = 'failed'; job.value.message = cause instanceof Error ? cause.message : t('unknownError'); showError(cause); persist()
+    } finally { busy.value = false }
   }
-
-  async function loadItems(kind: MigrationKind): Promise<void> {
-    if (!job.value || loadingItems[kind]) return
-    const jobId = job.value.id
-    loadingItems[kind] = true
-    try {
-      const items: ItemView[] = []
-      let total = 0
-      do {
-        const data = await api<ItemsPage>(
-          `/jobs/${jobId}/items?kind=${kind}&offset=${items.length}`,
-        )
-        total = data.total
-        if (!data.items.length && items.length < total) throw new Error(t('previewIncomplete'))
-        items.push(...data.items)
-      } while (items.length < total && job.value?.id === jobId)
-      if (job.value?.id === jobId) previewItems[kind] = items
-    } catch (cause) {
-      showError(cause)
-    } finally {
-      loadingItems[kind] = false
-    }
+  function availableItems(kind: MigrationKind): ItemView[] { return previewItems[kind].filter((item) => !item.alreadyThere) }
+  function allChosen(kind: MigrationKind): boolean { const items = availableItems(kind); return items.length > 0 && items.every((item) => chosenIds[kind].has(item.id)) }
+  function toggleAll(kind: MigrationKind): void { if (job.value?.stage !== 'ready') return; const clear = allChosen(kind); for (const item of availableItems(kind)) clear ? chosenIds[kind].delete(item.id) : chosenIds[kind].add(item.id); persist() }
+  function toggleItem(kind: MigrationKind, id: string): void { if (job.value?.stage !== 'ready' || !availableItems(kind).some((x) => x.id === id)) return; chosenIds[kind].has(id) ? chosenIds[kind].delete(id) : chosenIds[kind].add(id); persist() }
+  async function action(role: Role, kind: MigrationKind, id: string, remove = false): Promise<void> {
+    const name = kind === 'following' ? (remove ? 'unfollow' : 'follow') : (remove ? 'removeBookmark' : 'addBookmark')
+    await withCredentials(role, '/action', { action: name, id })
   }
-
-  function availableItems(kind: MigrationKind): ItemView[] {
-    return previewItems[kind].filter((item) => !item.alreadyThere)
-  }
-
-  function allChosen(kind: MigrationKind): boolean {
-    const items = availableItems(kind)
-    return items.length > 0 && items.every((item) => chosenIds[kind].has(item.id))
-  }
-
-  function toggleAll(kind: MigrationKind): void {
-    if (job.value?.stage !== 'ready') return
-    const items = availableItems(kind)
-    const clear = allChosen(kind)
-    for (const item of items) {
-      if (clear) chosenIds[kind].delete(item.id)
-      else chosenIds[kind].add(item.id)
-    }
-  }
-
-  function toggleItem(kind: MigrationKind, id: string): void {
-    if (job.value?.stage !== 'ready' || !availableItems(kind).some((item) => item.id === id)) return
-    if (chosenIds[kind].has(id)) chosenIds[kind].delete(id)
-    else chosenIds[kind].add(id)
-  }
-
+  function delay(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)) }
   async function begin(): Promise<void> {
-    if (
-      !job.value ||
-      !chosenCount.value ||
-      !previewComplete.value ||
-      !removalConfirmed.value ||
-      !selectionMatchesJob.value
-    )
-      return
-    error.value = ''
-    busy.value = true
+    if (!job.value || !chosenCount.value || !previewComplete.value || !removalConfirmed.value || !selectionMatchesJob.value || !connections.source || !connections.target) return
+    error.value = ''; busy.value = true; cancelled = false
+    job.value.stage = 'running'; job.value.progress = { processed: 0, total: chosenCount.value, copied: 0, alreadyThere: 0, removed: 0, failed: 0 }; persist()
     try {
-      const data = await api<{ job: JobView }>(`/jobs/${job.value.id}/start`, {
-        removeFollowing: removeSource.following,
-        removeBookmarks: removeSource.bookmarks,
-        removeConfirmation: wantsRemoval.value ? removeConfirmation.value : '',
-        followingIds: [...chosenIds.following],
-        bookmarkIds: [...chosenIds.bookmarks],
-      })
-      job.value = data.job
-      startPolling()
+      for (const kind of ['following', 'bookmarks'] as const) {
+        if (!job.value.selected[kind]) continue
+        for (const item of previewItems[kind]) {
+          if (!chosenIds[kind].has(item.id)) continue
+          if (cancelled) throw new Error('Migration stopped.')
+          if (item.alreadyThere) job.value.progress.alreadyThere++
+          else {
+            while (true) {
+              try { await action('target', kind, item.id); break }
+              catch (cause) {
+                if (!(cause instanceof Error) || !/429|rate limit|限流/i.test(cause.message)) throw cause
+                job.value.stage = 'paused'; job.value.retryAt = Date.now() + 60_000; persist(); await delay(60_000); job.value.stage = 'running'; job.value.retryAt = null
+              }
+            }
+            job.value.progress.copied++; item.alreadyThere = true; await delay(900)
+          }
+          if (removeSource[kind]) { await action('source', kind, item.id, true); job.value.progress.removed++; await delay(900) }
+          job.value.progress.processed++; persist()
+        }
+      }
+      job.value.stage = 'completed'; job.value.message = job.value.progress.failed ? '迁移结束，部分项目失败。' : '迁移完成。'; persist()
     } catch (cause) {
-      showError(cause)
-    } finally {
-      busy.value = false
-    }
+      if (cancelled) { job.value.stage = 'cancelled'; job.value.message = '任务已停止。' }
+      else { job.value.stage = 'failed'; job.value.message = cause instanceof Error ? cause.message : t('unknownError'); showError(cause) }
+      persist()
+    } finally { busy.value = false }
   }
-
-  async function cancel(): Promise<void> {
-    if (!job.value) return
-    error.value = ''
-    try {
-      const data = await api<{ job: JobView }>(`/jobs/${job.value.id}/cancel`, {})
-      job.value = data.job
-      if (data.job.stage === 'cancelled') stopPolling()
-    } catch (cause) {
-      showError(cause)
-    }
-  }
-
-  async function resume(): Promise<void> {
-    if (job.value?.stage !== 'paused') return
-    error.value = ''
-    busy.value = true
-    try {
-      const data = await api<{ job: JobView }>(`/jobs/${job.value.id}/resume`, {})
-      job.value = data.job
-      startPolling()
-    } catch (cause) {
-      showError(cause)
-    } finally {
-      busy.value = false
-    }
-  }
-
-  onMounted(() => {
-    void restoreSession()
-  })
-  onUnmounted(stopPolling)
-
-  return {
-    t,
-    locale,
-    setLocale,
-    credentials,
-    curlInput,
-    curlMessage,
-    curlInvalid,
-    connections,
-    connecting,
-    proxy,
-    queryIds,
-    selected,
-    removeSource,
-    removeConfirmation,
-    job,
-    previewKind,
-    previewItems,
-    chosenIds,
-    loadingItems,
-    busy,
-    error,
-    bothConnected,
-    sameAccount,
-    taskActive,
-    chosenCount,
-    previewComplete,
-    wantsRemoval,
-    removalConfirmed,
-    selectionMatchesJob,
-    percentage,
-    retryCountdown,
-    scanCount,
-    parseCurl,
-    connect,
-    disconnect,
-    scan,
-    availableItems,
-    allChosen,
-    toggleAll,
-    toggleItem,
-    begin,
-    cancel,
-    resume,
-  }
+  async function cancel(): Promise<void> { cancelled = true; if (job.value && ['scanning','running','paused'].includes(job.value.stage)) { job.value.stage = 'cancelled'; job.value.message = '任务已停止。'; persist() } }
+  async function resume(): Promise<void> { if (job.value?.stage !== 'paused') return; await begin() }
+  function setLocale(next: Locale): void { locale.value = next; saveLocale(next) }
+  onMounted(() => { restore(); clockTimer = setInterval(() => { clockNow.value = Date.now() }, 1000) })
+  onUnmounted(() => { if (clockTimer) clearInterval(clockTimer) })
+  return { t, locale, setLocale, credentials, curlInput, curlMessage, curlInvalid, connections, connecting, proxy, queryIds, selected, removeSource, removeConfirmation, job, previewKind, previewItems, chosenIds, loadingItems, busy, error, bothConnected, sameAccount, taskActive, chosenCount, previewComplete, wantsRemoval, removalConfirmed, selectionMatchesJob, percentage, retryCountdown, scanCount, parseCurl, connect, disconnect, scan, availableItems, allChosen, toggleAll, toggleItem, begin, cancel, resume }
 }
