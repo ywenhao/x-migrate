@@ -4,5 +4,5 @@ output/
 .playwright-mcp/
 .wrangler/
 pnpm-lock.yaml
-server/features.json
+shared/features.json
 docs/preview.png

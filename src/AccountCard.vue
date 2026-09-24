@@ -6,7 +6,7 @@ type Role = 'source' | 'target'
 
 const props = defineProps<{
   role: Role
-  connection: { sessionId: string; account: AccountView } | null
+  connection: { account: AccountView } | null
   connecting: Role | null
   taskActive: boolean
   curlMessage: string

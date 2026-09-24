@@ -3,6 +3,10 @@
   "name": "x-migrate",
   "main": "worker/index.ts",
   "compatibility_date": "2026-09-24",
+  "build": {
+    "command": "pnpm run build",
+  },
+  "previews": {},
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

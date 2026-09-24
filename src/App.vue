@@ -12,7 +12,6 @@ const {
   curlInvalid,
   connections,
   connecting,
-  proxy,
   queryIds,
   selected,
   removeSource,
@@ -160,15 +159,6 @@ const {
         <details class="help-details advanced">
           <summary>{{ t('advancedTitle') }}</summary>
           <div class="advanced-content">
-            <label for="proxy">{{ t('networkProxy') }}</label
-            ><input
-              id="proxy"
-              v-model="proxy"
-              autocomplete="off"
-              spellcheck="false"
-              :placeholder="t('proxyPlaceholder')"
-            />
-            <p>{{ t('proxyHelp') }}</p>
             <div class="query-grid">
               <label v-for="(_, operation) in queryIds" :key="operation"
                 >{{ operation
@@ -432,7 +422,10 @@ const {
           <div v-if="job.stage === 'paused'" class="status-panel pause-panel">
             <div>
               <strong>{{ t('ratePaused') }}</strong>
-              <p>{{ t('autoResume', { message: job.message, time: retryCountdown }) }}</p>
+              <p v-if="job.retryAt">
+                {{ t('autoResume', { message: job.message, time: retryCountdown }) }}
+              </p>
+              <p v-else>{{ job.message }}</p>
             </div>
             <button class="text-button" type="button" :disabled="busy" @click="resume">
               {{ t('resume') }}</button

@@ -1,9 +1,6 @@
 /**
- * 代理解析：优先级依次为
- *   1. 前端 UI 里手动填写的代理
- *   2. 环境变量 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY
- *   3. Windows 系统代理（读注册表）
- *   4. 直连（不使用代理）
+ * Node 代理解析：X_MIGRATE_PROXY 优先，其次检查通用代理环境变量，
+ * 然后检查 Windows 系统代理，最后直连。Worker 使用自己的网络出口。
  *
  * 访问 x.com 在大陆网络环境下通常需要代理，这里做到「零配置尽量能用」。
  */
@@ -20,12 +17,11 @@ function normalizeProxyUrl(raw: string | undefined | null): string | null {
   if (!raw) return null
   let s = raw.trim()
   if (!s) return null
-  // 允许用户只写 host:port
-  if (!/^[a-z]+:\/\//i.test(s)) s = 'http://' + s
+  // 允许只写 host:port
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = 'http://' + s
   try {
-    // 校验是否为合法 URL
-    // eslint-disable-next-line no-new
-    new URL(s)
+    const url = new URL(s)
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) return null
     return s
   } catch {
     return null
@@ -66,17 +62,16 @@ async function readWindowsSystemProxy(): Promise<string | null> {
 }
 
 /**
- * 根据「用户手填代理」解析出最终要用的代理 URL。
- * @param userProxy 前端传入的代理字符串，可为空
- *   - 传 "direct" 或 "none" 表示强制直连
+ * 解析 Node 服务使用的代理。X_MIGRATE_PROXY=direct 强制直连。
  */
-export async function resolveProxyUrl(userProxy?: string | null): Promise<string | null> {
-  const trimmed = (userProxy || '').trim().toLowerCase()
-  if (trimmed === 'direct' || trimmed === 'none' || trimmed === '直连') {
-    return null
+export async function resolveProxyUrl(): Promise<string | null> {
+  const explicit = process.env.X_MIGRATE_PROXY?.trim()
+  if (explicit) {
+    if (['direct', 'none', '直连'].includes(explicit.toLowerCase())) return null
+    const proxy = normalizeProxyUrl(explicit)
+    if (!proxy) throw new Error('X_MIGRATE_PROXY 必须是 HTTP(S) 代理地址或 direct。')
+    return proxy
   }
-  const manual = normalizeProxyUrl(userProxy)
-  if (manual) return manual
 
   const env =
     process.env.HTTPS_PROXY ||

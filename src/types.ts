@@ -15,6 +15,7 @@ export interface ScanListProgress {
   total: number | null
   page: number
   done: boolean
+  inferredEnd?: boolean
 }
 
 export interface ScanKindProgress {

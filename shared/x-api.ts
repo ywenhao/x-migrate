@@ -1,9 +1,27 @@
-import { request, type Dispatcher } from 'undici'
-import { setTimeout as sleep } from 'node:timers/promises'
 import { ClientTransaction } from 'x-client-transaction-id'
 import { parseHTML } from 'linkedom'
-import { makeDispatcher, resolveProxyUrl } from './proxy.ts'
 import features from './features.json' with { type: 'json' }
+import { readCompleteList } from './pagination.ts'
+
+export type Fetcher = (url: string, init?: RequestInit) => Promise<Response>
+const nativeFetch: Fetcher = (url, init) => globalThis.fetch(url, init)
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason)
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    const abort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      reject(signal?.reason)
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
 
 const X_ORIGIN = 'https://x.com'
 const ASSET_ORIGIN = 'https://abs.twimg.com'
@@ -18,8 +36,6 @@ const OPERATIONS = new Set([
   'DeleteBookmark',
 ])
 const DISCOVERY_TTL = 60 * 60 * 1000
-const MAX_PAGES = 500
-const MAX_STALE_PAGES = 10
 const MAX_ASSETS = 45
 const SCAN_REQUEST_GAP_MS = 2_000
 // X 的完整 feature 快照有数百项。时间线请求只发送这些字段，
@@ -142,11 +158,8 @@ export class XApiError extends Error {
   }
 }
 
-function rateLimitReset(headers: Record<string, string | string[] | undefined>): number | null {
-  const value = (name: string) => {
-    const raw = headers[name]
-    return Array.isArray(raw) ? raw[0] : raw
-  }
+function rateLimitReset(headers: Headers): number | null {
+  const value = (name: string) => headers.get(name) || undefined
   const now = Date.now()
   const candidates: number[] = []
   const retryAfter = value('retry-after')
@@ -402,42 +415,30 @@ export function validateQueryIds(input: unknown): QueryIds {
 }
 
 export class XClient {
-  readonly dispatcher: Dispatcher
   private transactionPromise: Promise<ClientTransaction | null> | null = null
   private lastScanRequestFinishedAt = 0
-  private constructor(
+  private discoveryFiles = new Map<string, Promise<string>>()
+  private discoveryAssetFetches = 0
+  constructor(
     private readonly authToken: string,
     private readonly ct0: string,
     private readonly overrides: QueryIds,
-    dispatcher: Dispatcher,
-  ) {
-    this.dispatcher = dispatcher
-  }
+    private readonly request: Fetcher = nativeFetch,
+    private readonly onClose: () => Promise<void> = async () => {},
+  ) {}
 
   static async create(
     authToken: string,
     ct0: string,
-    proxy: string,
     overrides: QueryIds,
+    request: Fetcher = nativeFetch,
+    onClose: () => Promise<void> = async () => {},
   ): Promise<XClient> {
-    const chosen = proxy.trim()
-    if (chosen && !['direct', 'none', '直连'].includes(chosen.toLowerCase())) {
-      const url = new URL(/^[a-z]+:\/\//i.test(chosen) ? chosen : `http://${chosen}`)
-      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) {
-        throw new XApiError(
-          '代理只支持 HTTP 或 HTTPS 地址。',
-          undefined,
-          null,
-          'Only HTTP and HTTPS proxy URLs are supported.',
-        )
-      }
-    }
-    const proxyUrl = await resolveProxyUrl(chosen)
-    return new XClient(authToken, ct0, overrides, makeDispatcher(proxyUrl))
+    return new XClient(authToken, ct0, overrides, request, onClose)
   }
 
   async close(): Promise<void> {
-    await this.dispatcher.close()
+    await this.onClose()
   }
 
   private headers(json = false): Record<string, string> {
@@ -518,29 +519,28 @@ export class XClient {
       ? await this.signedHeaders(method, path, body !== undefined)
       : this.headers(body !== undefined)
     signal?.throwIfAborted()
-    const response = await request(`${X_ORIGIN}${path}`, {
+    const response = await this.request(`${X_ORIGIN}${path}`, {
       method,
-      dispatcher: this.dispatcher,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,
     })
-    const raw = await response.body.text()
+    const raw = await response.text()
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
     } catch {
       parsed = {}
     }
-    if (response.statusCode === 401 || response.statusCode === 403) {
+    if (response.status === 401 || response.status === 403) {
       throw new XApiError(
         'X 拒绝了会话。请重新复制 auth_token 和 ct0，或确认账号没有被限制。',
-        response.statusCode,
+        response.status,
         null,
         'X rejected the session. Copy fresh auth_token and ct0 values and check that the account is unrestricted.',
       )
     }
-    if (response.statusCode === 429) {
+    if (response.status === 429) {
       throw new XApiError(
         'X 接口已限流。请稍后重新扫描或迁移。',
         429,
@@ -548,14 +548,16 @@ export class XClient {
         'X rate limited this request. Scan or transfer again later.',
       )
     }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
+    if (response.status < 200 || response.status >= 300) {
       const detail = safeErrorMessage(parsed)
-      const endpoint = path.startsWith('/i/api/graphql/') ? path.split('/')[5] : path.split('?')[0]
+      const endpoint = path.startsWith('/i/api/graphql/')
+        ? path.split('?')[0].split('/').at(-1)
+        : path.split('?')[0]
       throw new XApiError(
-        `X 接口 ${endpoint} 返回 ${response.statusCode}${detail ? `：${detail}` : ''}`,
-        response.statusCode,
+        `X 接口 ${endpoint} 返回 ${response.status}${detail ? `：${detail}` : ''}`,
+        response.status,
         null,
-        `X endpoint ${endpoint} returned ${response.statusCode}${detail ? `: ${detail}` : ''}`,
+        `X endpoint ${endpoint} returned ${response.status}${detail ? `: ${detail}` : ''}`,
       )
     }
     const detail = safeErrorMessage(parsed)
@@ -726,29 +728,41 @@ export class XClient {
   }
 
   private async text(url: string, authenticated: boolean): Promise<string> {
-    const response = await request(url, {
+    const response = await this.request(url, {
       method: 'GET',
-      dispatcher: this.dispatcher,
       headers: authenticated ? this.headers() : { accept: '*/*' },
     })
-    if (response.statusCode !== 200) {
-      await response.body.dump()
+    if (response.status !== 200) {
       throw new XApiError(
-        `无法读取 X 网页或脚本（${response.statusCode}）。`,
-        response.statusCode,
+        `无法读取 X 网页或脚本（${response.status}）。`,
+        response.status,
         null,
-        `Could not read the X page or script (${response.statusCode}).`,
+        `Could not read the X page or script (${response.status}).`,
       )
     }
-    return await response.body.text()
+    return await response.text()
   }
 
-  private async discover(): Promise<QueryIds> {
-    if (Date.now() - discoveredAt < DISCOVERY_TTL) return discoveredIds
-    const found: QueryIds = {}
+  private discoveryText(url: string): Promise<string> {
+    let result = this.discoveryFiles.get(url)
+    if (!result) {
+      if (url !== `${X_ORIGIN}/home`) {
+        if (this.discoveryAssetFetches >= MAX_ASSETS)
+          return Promise.reject(new Error('Asset limit'))
+        this.discoveryAssetFetches++
+      }
+      result = this.text(url, false)
+      this.discoveryFiles.set(url, result)
+    }
+    return result
+  }
+
+  private async discover(wanted: Operation): Promise<QueryIds> {
+    const found: QueryIds = Date.now() - discoveredAt < DISCOVERY_TTL ? { ...discoveredIds } : {}
+    if (found[wanted]) return found
     // Script IDs are public; sending account cookies to the HTML page can
     // make X reject this discovery request even when its API session works.
-    const html = await this.text(`${X_ORIGIN}/home`, false)
+    const html = await this.discoveryText(`${X_ORIGIN}/home`)
     findOperations(html, found)
     const queue = [...new Set([...scriptUrls(html), ...runtimeChunkUrls(html)])].sort((a, b) => {
       const priority = (url: string) => {
@@ -760,16 +774,12 @@ export class XClient {
       return priority(a) - priority(b)
     })
     const seen = new Set<string>()
-    while (
-      queue.length > 0 &&
-      seen.size < MAX_ASSETS &&
-      Object.keys(found).length < OPERATIONS.size
-    ) {
+    while (queue.length > 0 && seen.size < MAX_ASSETS && !found[wanted]) {
       const url = queue.shift()!
       if (seen.has(url)) continue
       seen.add(url)
       try {
-        const script = await this.text(url, false)
+        const script = await this.discoveryText(url)
         findOperations(script, found)
         for (const nested of scriptUrls(script)) if (!seen.has(nested)) queue.push(nested)
       } catch {
@@ -783,14 +793,14 @@ export class XClient {
 
   private async operationId(operation: Operation): Promise<string> {
     if (this.overrides[operation]) return this.overrides[operation]!
-    const ids = await this.discover()
+    const ids = await this.discover(operation)
     const id = ids[operation]
     if (!id) {
       throw new XApiError(
-        `未找到 ${operation} 查询 ID。请在“高级设置”中从 X 网页 Network 请求填入该操作的 ID 后重新连接。`,
+        `未找到 ${operation} 查询 ID。请在“高级设置”中从 X 网页 Network 请求填入该操作的 ID 后重试。`,
         undefined,
         null,
-        `Could not find the ${operation} query ID. Copy it from the matching X Network request into Advanced settings and reconnect.`,
+        `Could not find the ${operation} query ID. Copy it from the matching X Network request into Advanced settings and retry.`,
       )
     }
     return id
@@ -835,7 +845,7 @@ export class XClient {
       const scanning = operation === 'Following' || operation === 'Bookmarks'
       if (scanning && this.lastScanRequestFinishedAt) {
         const remaining = SCAN_REQUEST_GAP_MS - (Date.now() - this.lastScanRequestFinishedAt)
-        if (remaining > 0) await sleep(remaining, undefined, { signal })
+        if (remaining > 0) await sleep(remaining, signal)
       }
       try {
         return await this.json(
@@ -867,74 +877,34 @@ export class XClient {
     signal?: AbortSignal,
     expectedCount?: number | null,
   ): Promise<MigrationItem[]> {
-    const all: MigrationItem[] = []
-    const seenIds = new Set<string>()
-    const seenCursors = new Set<string>()
-    let cursor: string | null = null
-    let stalePages = 0
-    for (let page = 0; page < MAX_PAGES; page++) {
-      signal?.throwIfAborted()
-      const variables: JsonObject =
-        kind === 'following'
-          ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
-          : { count: 20, includePromotedContent: false }
-      if (cursor) variables.cursor = cursor
-      const body = await this.graphqlGet(
-        kind === 'following' ? 'Following' : 'Bookmarks',
-        variables,
-        graphqlFeatures,
-        undefined,
-        signal,
-      )
-      signal?.throwIfAborted()
-      const result = parseTimeline(body, kind)
-      const previousCount = all.length
-      for (const item of result.items) {
-        if (!seenIds.has(item.id)) {
-          seenIds.add(item.id)
-          all.push(item)
-        }
-      }
-      stalePages = all.length === previousCount ? stalePages + 1 : 0
-      const repeatedCursor = !!result.cursor && seenCursors.has(result.cursor)
-      const knownFollowingCount =
-        kind === 'following' && expectedCount !== null && expectedCount !== undefined
-      const inferredEnd =
-        !!result.cursor &&
-        !knownFollowingCount &&
-        (stalePages >= 2 || (repeatedCursor && stalePages >= 1))
-      onPage?.(all.length, page + 1, inferredEnd)
-      if (!result.cursor) return all
-      if (knownFollowingCount && all.length === expectedCount && stalePages >= 1) return all
-      if (inferredEnd) return all
-      if (stalePages >= MAX_STALE_PAGES) {
-        const expected =
-          kind === 'following' && expectedCount !== null && expectedCount !== undefined
-            ? `，账号资料显示总关注 ${expectedCount} 项`
-            : ''
-        throw new XApiError(
-          `X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项${expected}。`,
-          undefined,
-          null,
-          `X returned no new ${kind === 'following' ? 'follows' : 'bookmarks'} for ${MAX_STALE_PAGES} pages. Scanning stopped to avoid missing data. Page ${page + 1} returned ${result.items.length}; ${all.length} read in total${expectedCount === null || expectedCount === undefined ? '' : `; profile count: ${expectedCount}`}.`,
-        )
-      }
-      if (repeatedCursor)
-        throw new XApiError(
-          'X 返回重复分页游标，已停止扫描以避免遗漏数据。',
-          undefined,
-          null,
-          'X returned a repeated page cursor. Scanning stopped to avoid missing data.',
-        )
-      seenCursors.add(result.cursor)
-      cursor = result.cursor
-    }
-    throw new XApiError(
-      '列表超过 500 页，已停止扫描以避免只迁移部分数据。',
-      undefined,
-      null,
-      'The list exceeds 500 pages. Scanning stopped to avoid a partial transfer.',
+    return readCompleteList(
+      kind,
+      expectedCount ?? null,
+      (cursor) => this.page(kind, userId, cursor, signal),
+      onPage,
+      signal,
     )
+  }
+
+  async page(
+    kind: 'following' | 'bookmarks',
+    userId?: string,
+    cursor?: string | null,
+    signal?: AbortSignal,
+  ): Promise<{ items: MigrationItem[]; cursor: string | null }> {
+    const variables: JsonObject =
+      kind === 'following'
+        ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
+        : { count: 20, includePromotedContent: false }
+    if (cursor) variables.cursor = cursor
+    const body = await this.graphqlGet(
+      kind === 'following' ? 'Following' : 'Bookmarks',
+      variables,
+      graphqlFeatures,
+      undefined,
+      signal,
+    )
+    return parseTimeline(body, kind)
   }
 
   async following(
@@ -954,23 +924,22 @@ export class XClient {
 
   private async friendship(action: 'create' | 'destroy', userId: string): Promise<void> {
     const path = `/i/api/1.1/friendships/${action}.json`
-    const response = await request(`${X_ORIGIN}${path}`, {
+    const response = await this.request(`${X_ORIGIN}${path}`, {
       method: 'POST',
-      dispatcher: this.dispatcher,
       headers: {
         ...(await this.signedHeaders('POST', path)),
         'content-type': 'application/x-www-form-urlencoded',
       },
       body: new URLSearchParams({ user_id: userId }).toString(),
     })
-    const raw = await response.body.text()
+    const raw = await response.text()
     let body: unknown
     try {
       body = JSON.parse(raw)
     } catch {
       body = {}
     }
-    if (response.statusCode === 429) {
+    if (response.status === 429) {
       throw new XApiError(
         'X 接口已限流。请稍后继续。',
         429,
@@ -978,12 +947,12 @@ export class XClient {
         'X rate limited this request. Resume later.',
       )
     }
-    if (response.statusCode < 200 || response.statusCode >= 300 || safeErrorMessage(body)) {
+    if (response.status < 200 || response.status >= 300 || safeErrorMessage(body)) {
       throw new XApiError(
-        `${action === 'create' ? '关注' : '取消关注'}失败（${response.statusCode}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`,
-        response.statusCode,
+        `${action === 'create' ? '关注' : '取消关注'}失败（${response.status}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`,
+        response.status,
         null,
-        `${action === 'create' ? 'Follow' : 'Unfollow'} failed (${response.statusCode})${safeErrorMessage(body) ? `: ${safeErrorMessage(body)}` : ''}`,
+        `${action === 'create' ? 'Follow' : 'Unfollow'} failed (${response.status})${safeErrorMessage(body) ? `: ${safeErrorMessage(body)}` : ''}`,
       )
     }
   }
