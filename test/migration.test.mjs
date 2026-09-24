@@ -4,10 +4,34 @@ import { createServer } from 'vite'
 import { xApiPlugin } from '../server/plugin.ts'
 import { XApiError, XClient, parseTimeline } from '../server/x-api.ts'
 
-const user = (id, handle) => ({ id, label: handle, detail: `@${handle}`, url: `https://x.com/${handle}`, avatarUrl: null })
-const tweet = (id) => ({ id, label: `推文 ${id}`, detail: '@author', url: `https://x.com/i/web/status/${id}`, avatarUrl: null })
-const sourceAccount = { id: '100', screenName: 'old_account', name: 'Old', avatarUrl: null, followingCount: 2 }
-const targetAccount = { id: '200', screenName: 'new_account', name: 'New', avatarUrl: null, followingCount: 1 }
+const user = (id, handle) => ({
+  id,
+  label: handle,
+  detail: `@${handle}`,
+  url: `https://x.com/${handle}`,
+  avatarUrl: null,
+})
+const tweet = (id) => ({
+  id,
+  label: `推文 ${id}`,
+  detail: '@author',
+  url: `https://x.com/i/web/status/${id}`,
+  avatarUrl: null,
+})
+const sourceAccount = {
+  id: '100',
+  screenName: 'old_account',
+  name: 'Old',
+  avatarUrl: null,
+  followingCount: 2,
+}
+const targetAccount = {
+  id: '200',
+  screenName: 'new_account',
+  name: 'New',
+  avatarUrl: null,
+  followingCount: 1,
+}
 const actions = []
 let failFollow = false
 let server
@@ -18,8 +42,12 @@ const sourceClient = {
   verify: async () => sourceAccount,
   following: async () => [user('301', 'first'), user('302', 'second')],
   bookmarks: async () => [tweet('401'), tweet('402')],
-  unfollow: async (id) => { actions.push(`source:unfollow:${id}`) },
-  removeBookmark: async (id) => { actions.push(`source:unbookmark:${id}`) },
+  unfollow: async (id) => {
+    actions.push(`source:unfollow:${id}`)
+  },
+  removeBookmark: async (id) => {
+    actions.push(`source:unbookmark:${id}`)
+  },
   close: async () => {},
 }
 const targetClient = {
@@ -30,22 +58,41 @@ const targetClient = {
     actions.push(`target:follow:${id}`)
     if (failFollow) throw new Error('目标账号无法关注')
   },
-  addBookmark: async (id) => { actions.push(`target:bookmark:${id}`) },
+  addBookmark: async (id) => {
+    actions.push(`target:bookmark:${id}`)
+  },
   close: async () => {},
 }
 
 test('解析 X 时间线中的用户、推文和底部分页游标', () => {
   const followingEntries = [
-    { content: { itemContent: { user_results: { result: {
-      rest_id: '301', core: { screen_name: 'first', name: 'First User' },
-      avatar: { image_url: 'https://pbs.twimg.com/first.jpg' },
-    } } } } },
+    {
+      content: {
+        itemContent: {
+          user_results: {
+            result: {
+              rest_id: '301',
+              core: { screen_name: 'first', name: 'First User' },
+              avatar: { image_url: 'https://pbs.twimg.com/first.jpg' },
+            },
+          },
+        },
+      },
+    },
     { content: { cursorType: 'Bottom', value: 'next-following' } },
   ]
   const followingResponse = {
-    data: { user: { result: { timeline: { timeline: {
-      instructions: [{ type: 'TimelineAddEntries', entries: followingEntries }],
-    } } } } },
+    data: {
+      user: {
+        result: {
+          timeline: {
+            timeline: {
+              instructions: [{ type: 'TimelineAddEntries', entries: followingEntries }],
+            },
+          },
+        },
+      },
+    },
   }
   const following = parseTimeline(followingResponse, 'following')
   assert.equal(following.items[0].id, '301')
@@ -53,19 +100,32 @@ test('解析 X 时间线中的用户、推文和底部分页游标', () => {
   assert.equal(following.cursor, 'next-following')
 
   const bookmarkEntries = [
-    { content: { itemContent: { tweet_results: { result: {
-      __typename: 'TweetWithVisibilityResults',
-      tweet: {
-        rest_id: '401', legacy: { full_text: 'saved text' },
-        core: { user_results: { result: { core: { screen_name: 'author' } } } },
+    {
+      content: {
+        itemContent: {
+          tweet_results: {
+            result: {
+              __typename: 'TweetWithVisibilityResults',
+              tweet: {
+                rest_id: '401',
+                legacy: { full_text: 'saved text' },
+                core: { user_results: { result: { core: { screen_name: 'author' } } } },
+              },
+            },
+          },
+        },
       },
-    } } } } },
+    },
     { content: { cursorType: 'Bottom', value: 'next-bookmarks', stopOnEmptyResponse: true } },
   ]
   const bookmarksResponse = {
-    data: { bookmark_timeline_v2: { timeline: {
-      instructions: [{ type: 'TimelineAddEntries', entries: bookmarkEntries }],
-    } } },
+    data: {
+      bookmark_timeline_v2: {
+        timeline: {
+          instructions: [{ type: 'TimelineAddEntries', entries: bookmarkEntries }],
+        },
+      },
+    },
   }
   const bookmarks = parseTimeline(bookmarksResponse, 'bookmarks')
   assert.equal(bookmarks.items[0].id, '401')
@@ -77,14 +137,26 @@ test('解析 X 时间线中的用户、推文和底部分页游标', () => {
     { content: { cursorType: 'Bottom', value: 'same-cursor', stopOnEmptyResponse: true } },
   ]
   const terminalBookmarks = {
-    data: { bookmark_timeline_v2: { timeline: {
-      instructions: [{ type: 'TimelineAddEntries', entries: terminalEntries }],
-    } } },
+    data: {
+      bookmark_timeline_v2: {
+        timeline: {
+          instructions: [{ type: 'TimelineAddEntries', entries: terminalEntries }],
+        },
+      },
+    },
   }
   const terminalFollowing = {
-    data: { user: { result: { timeline: { timeline: {
-      instructions: [{ type: 'TimelineAddEntries', entries: terminalEntries }],
-    } } } } },
+    data: {
+      user: {
+        result: {
+          timeline: {
+            timeline: {
+              instructions: [{ type: 'TimelineAddEntries', entries: terminalEntries }],
+            },
+          },
+        },
+      },
+    },
   }
   assert.deepEqual(parseTimeline(terminalBookmarks, 'bookmarks'), { items: [], cursor: null })
   assert.deepEqual(parseTimeline(terminalFollowing, 'following'), { items: [], cursor: null })
@@ -95,17 +167,33 @@ test('收藏空页带停止标记时结束分页', async () => {
   let requests = 0
   client.graphqlGet = async () => {
     requests++
-    const entries = requests === 1
-      ? [
-          { content: { itemContent: { tweet_results: { result: {
-            rest_id: '401', legacy: { full_text: 'saved text' },
-          } } } } },
-          { content: { cursorType: 'Bottom', value: 'last-cursor' } },
-        ]
-      : [{ content: { cursorType: 'Bottom', value: 'last-cursor', stopOnEmptyResponse: true } }]
-    return { data: { bookmark_timeline_v2: { timeline: {
-      instructions: [{ type: 'TimelineAddEntries', entries }],
-    } } } }
+    const entries =
+      requests === 1
+        ? [
+            {
+              content: {
+                itemContent: {
+                  tweet_results: {
+                    result: {
+                      rest_id: '401',
+                      legacy: { full_text: 'saved text' },
+                    },
+                  },
+                },
+              },
+            },
+            { content: { cursorType: 'Bottom', value: 'last-cursor' } },
+          ]
+        : [{ content: { cursorType: 'Bottom', value: 'last-cursor', stopOnEmptyResponse: true } }]
+    return {
+      data: {
+        bookmark_timeline_v2: {
+          timeline: {
+            instructions: [{ type: 'TimelineAddEntries', entries }],
+          },
+        },
+      },
+    }
   }
   const items = await client.bookmarks()
   assert.equal(requests, 2)
@@ -117,10 +205,19 @@ test('Viewer 账号资料提供关注总数', async () => {
   const client = new XClient('fake', 'fake', {}, {})
   client.graphqlGet = async (operation) => {
     assert.equal(operation, 'Viewer')
-    return { data: { viewer: { user_results: { result: {
-      rest_id: '100', core: { screen_name: 'old_account', name: 'Old' },
-      relationship_counts: { following: 1170 },
-    } } } } }
+    return {
+      data: {
+        viewer: {
+          user_results: {
+            result: {
+              rest_id: '100',
+              core: { screen_name: 'old_account', name: 'Old' },
+              relationship_counts: { following: 1170 },
+            },
+          },
+        },
+      },
+    }
   }
   const account = await client.verify()
   assert.equal(account.followingCount, 1170)
@@ -132,7 +229,8 @@ test('Viewer 缺少关注总数时从账号资料补全', async () => {
   client.graphqlGet = async (operation) => {
     operations.push(operation)
     const result = {
-      rest_id: '100', core: { screen_name: 'old_account', name: 'Old' },
+      rest_id: '100',
+      core: { screen_name: 'old_account', name: 'Old' },
       ...(operation === 'UserByScreenName' ? { relationship_counts: { following: 1170 } } : {}),
     }
     return operation === 'Viewer'
@@ -148,7 +246,8 @@ test('账号资料的最新关注总数覆盖 Viewer 旧值', async () => {
   const client = new XClient('fake', 'fake', {}, {})
   client.graphqlGet = async (operation) => {
     const result = {
-      rest_id: '100', core: { screen_name: 'old_account', name: 'Old' },
+      rest_id: '100',
+      core: { screen_name: 'old_account', name: 'Old' },
       relationship_counts: { following: operation === 'Viewer' ? 1169 : 1170 },
     }
     return operation === 'Viewer'
@@ -180,7 +279,8 @@ async function waitFor(jobId, stage) {
 }
 
 before(async () => {
-  XClient.create = async (authToken) => authToken.startsWith('source') ? sourceClient : targetClient
+  XClient.create = async (authToken) =>
+    authToken.startsWith('source') ? sourceClient : targetClient
   server = await createServer({
     configFile: false,
     plugins: [xApiPlugin()],
@@ -210,6 +310,11 @@ test('预览去重、移除确认及先迁入后移除', async () => {
   assert.equal(scan.status, 202)
   const jobId = scan.data.job.id
   const ready = await waitFor(jobId, 'ready')
+  const englishReady = await fetch(`${base}/api/jobs/${jobId}`, {
+    headers: { 'accept-language': 'en-US' },
+  }).then((response) => response.json())
+  assert.match(englishReady.job.message, /Scan complete/)
+  assert.match(ready.message, /扫描完成/)
   assert.deepEqual(ready.summary.following, { source: 2, alreadyThere: 1, toCopy: 1 })
   assert.deepEqual(ready.summary.bookmarks, { source: 2, alreadyThere: 1, toCopy: 1 })
   assert.equal(ready.scanProgress.following.source.total, 2)
@@ -227,6 +332,18 @@ test('预览去重、移除确认及先迁入后移除', async () => {
   })
   assert.equal(rejected.status, 400)
   assert.match(rejected.data.error, /old_account/)
+  const englishRejected = await fetch(`${base}/api/jobs/${jobId}/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'accept-language': 'en-US' },
+    body: JSON.stringify({
+      followingIds: ['301'],
+      bookmarkIds: ['401'],
+      removeFollowing: true,
+      removeConfirmation: '@wrong_account',
+    }),
+  })
+  assert.equal(englishRejected.status, 400)
+  assert.match((await englishRejected.json()).error, /Enter @old_account/)
 
   const nothingSelected = await post(`/jobs/${jobId}/start`, { followingIds: [], bookmarkIds: [] })
   assert.equal(nothingSelected.status, 400)
@@ -300,8 +417,10 @@ test('429 暂停后可手动继续同一项目', async () => {
     const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
     const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
     const scan = await post('/scan', {
-      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
-      following: true, bookmarks: false,
+      sourceSessionId: source.data.sessionId,
+      targetSessionId: target.data.sessionId,
+      following: true,
+      bookmarks: false,
     })
     const jobId = scan.data.job.id
     await waitFor(jobId, 'ready')
@@ -332,8 +451,10 @@ test('429 按恢复时间自动继续，也可在暂停时停止', async () => {
     const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
     const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
     const scan = await post('/scan', {
-      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
-      following: true, bookmarks: false,
+      sourceSessionId: source.data.sessionId,
+      targetSessionId: target.data.sessionId,
+      following: true,
+      bookmarks: false,
     })
     const jobId = scan.data.job.id
     await waitFor(jobId, 'ready')
@@ -343,10 +464,15 @@ test('429 按恢复时间自动继续，也可在暂停时停止', async () => {
     assert.equal(completed.progress.copied, 1)
     assert.equal(calls, 2)
 
-    targetClient.follow = async () => { calls++; throw new XApiError('X 接口已限流。', 429) }
+    targetClient.follow = async () => {
+      calls++
+      throw new XApiError('X 接口已限流。', 429)
+    }
     const next = await post('/scan', {
-      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
-      following: true, bookmarks: false,
+      sourceSessionId: source.data.sessionId,
+      targetSessionId: target.data.sessionId,
+      following: true,
+      bookmarks: false,
     })
     const nextJobId = next.data.job.id
     await waitFor(nextJobId, 'ready')
@@ -364,7 +490,9 @@ test('旧账号清理限流后继续，不重复新增目标内容', async () =>
   const originalUnfollow = sourceClient.unfollow
   let follows = 0
   let unfollows = 0
-  targetClient.follow = async () => { follows++ }
+  targetClient.follow = async () => {
+    follows++
+  }
   sourceClient.unfollow = async () => {
     unfollows++
     if (unfollows === 1) throw new XApiError('X 接口已限流。', 429)
@@ -373,14 +501,18 @@ test('旧账号清理限流后继续，不重复新增目标内容', async () =>
     const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
     const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
     const scan = await post('/scan', {
-      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
-      following: true, bookmarks: false,
+      sourceSessionId: source.data.sessionId,
+      targetSessionId: target.data.sessionId,
+      following: true,
+      bookmarks: false,
     })
     const jobId = scan.data.job.id
     await waitFor(jobId, 'ready')
     await post(`/jobs/${jobId}/start`, {
-      followingIds: ['301'], bookmarkIds: [],
-      removeFollowing: true, removeConfirmation: '@old_account',
+      followingIds: ['301'],
+      bookmarkIds: [],
+      removeFollowing: true,
+      removeConfirmation: '@old_account',
     })
     await waitFor(jobId, 'paused')
     await post(`/jobs/${jobId}/resume`, {})
@@ -399,15 +531,21 @@ test('旧账号清理限流后继续，不重复新增目标内容', async () =>
 test('刷新可读取会话，停止扫描会立即中断当前读取', async () => {
   const originalFollowing = sourceClient.following
   let signalReceived
-  const started = new Promise((resolve) => { signalReceived = resolve })
+  const started = new Promise((resolve) => {
+    signalReceived = resolve
+  })
   let aborted = false
   sourceClient.following = async (_account, _onPage, signal) => {
     signalReceived()
     await new Promise((_, reject) => {
-      signal.addEventListener('abort', () => {
-        aborted = true
-        reject(new Error('scan aborted'))
-      }, { once: true })
+      signal.addEventListener(
+        'abort',
+        () => {
+          aborted = true
+          reject(new Error('scan aborted'))
+        },
+        { once: true },
+      )
     })
     return []
   }
@@ -441,9 +579,19 @@ test('连续无新增项目时安全停止分页', async () => {
   client.graphqlGet = async (_operation, variables) => {
     assert.equal(variables.count, 100)
     return {
-      data: { user: { result: { timeline: { timeline: {
-        instructions: [{ entries: [{ content: { cursorType: 'Bottom', value: `cursor-${++page}` } }] }],
-      } } } } },
+      data: {
+        user: {
+          result: {
+            timeline: {
+              timeline: {
+                instructions: [
+                  { entries: [{ content: { cursorType: 'Bottom', value: `cursor-${++page}` } }] },
+                ],
+              },
+            },
+          },
+        },
+      },
     }
   }
   await assert.rejects(() => client.following(sourceAccount), /连续 10 页未返回新的关注项目/)
@@ -455,17 +603,37 @@ test('关注人数达到账号总数后，下一页无新增即结束扫描', as
   let page = 0
   client.graphqlGet = async () => {
     page++
-    const entries = page === 1
-      ? [
-          { content: { itemContent: { user_results: { result: {
-            rest_id: '301', core: { screen_name: 'first', name: 'First User' },
-          } } } } },
-          { content: { cursorType: 'Bottom', value: 'cursor-1' } },
-        ]
-      : [{ content: { cursorType: 'Bottom', value: `cursor-${page}` } }]
-    return { data: { user: { result: { timeline: { timeline: {
-      instructions: [{ type: 'TimelineAddEntries', entries }],
-    } } } } } }
+    const entries =
+      page === 1
+        ? [
+            {
+              content: {
+                itemContent: {
+                  user_results: {
+                    result: {
+                      rest_id: '301',
+                      core: { screen_name: 'first', name: 'First User' },
+                    },
+                  },
+                },
+              },
+            },
+            { content: { cursorType: 'Bottom', value: 'cursor-1' } },
+          ]
+        : [{ content: { cursorType: 'Bottom', value: `cursor-${page}` } }]
+    return {
+      data: {
+        user: {
+          result: {
+            timeline: {
+              timeline: {
+                instructions: [{ type: 'TimelineAddEntries', entries }],
+              },
+            },
+          },
+        },
+      },
+    }
   }
   const items = await client.following({ ...sourceAccount, followingCount: 1 })
   assert.equal(items.length, 1)
@@ -473,24 +641,46 @@ test('关注人数达到账号总数后，下一页无新增即结束扫描', as
 })
 
 test('收藏连续空页或重复游标时按末尾处理', async () => {
-  const response = (entries) => ({ data: { bookmark_timeline_v2: { timeline: {
-    instructions: [{ type: 'TimelineAddEntries', entries }],
-  } } } })
-  const saved = { content: { itemContent: { tweet_results: { result: {
-    rest_id: '401', legacy: { full_text: 'saved text' },
-  } } } } }
+  const response = (entries) => ({
+    data: {
+      bookmark_timeline_v2: {
+        timeline: {
+          instructions: [{ type: 'TimelineAddEntries', entries }],
+        },
+      },
+    },
+  })
+  const saved = {
+    content: {
+      itemContent: {
+        tweet_results: {
+          result: {
+            rest_id: '401',
+            legacy: { full_text: 'saved text' },
+          },
+        },
+      },
+    },
+  }
 
-  for (const cursors of [['cursor-1', 'cursor-2', 'cursor-3'], ['cursor-1', 'cursor-1']]) {
+  for (const cursors of [
+    ['cursor-1', 'cursor-2', 'cursor-3'],
+    ['cursor-1', 'cursor-1'],
+  ]) {
     const client = new XClient('fake', 'fake', {}, {})
     let page = 0
     let inferredEnd = false
     client.graphqlGet = async () => {
       const cursor = cursors[page++]
-      return response(page === 1
-        ? [saved, { content: { cursorType: 'Bottom', value: cursor } }]
-        : [{ content: { cursorType: 'Bottom', value: cursor } }])
+      return response(
+        page === 1
+          ? [saved, { content: { cursorType: 'Bottom', value: cursor } }]
+          : [{ content: { cursorType: 'Bottom', value: cursor } }],
+      )
     }
-    const items = await client.bookmarks((_count, _page, inferred) => { inferredEnd = inferred })
+    const items = await client.bookmarks((_count, _page, inferred) => {
+      inferredEnd = inferred
+    })
     assert.equal(items.length, 1)
     assert.equal(page, cursors.length)
     assert.equal(inferredEnd, true)

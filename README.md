@@ -1,42 +1,81 @@
-# X 迁移助手
+<div align="center">
 
-本地网页工具，用于把一个 X 账号的关注和收藏迁移到另一个账号。迁移前会扫描两个账号、展示数量和预览，并跳过目标账号已有的内容。旧账号的关注和收藏默认保留；如需移除，必须分别勾选并输入旧账号用户名确认。
+# X Migrate
 
-## 运行
+**Move your follows and bookmarks between X accounts.**
 
-需要 Node.js 24 和 pnpm。
+Scan both accounts, review every item, and choose exactly what to transfer.
+
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+<img src="docs/preview.png" alt="X Migrate account connection screen" width="900">
+
+</div>
+
+> [!IMPORTANT]
+> This tool uses X web session cookies (`auth_token` and `ct0`). Treat them like passwords. Run the local version on a computer you trust. If you host the Worker version, protect the public site with access control before entering cookies.
+
+## What it does
+
+- Migrates follows, bookmarks, or both. It scans the complete selected lists on both accounts and skips items already on the destination.
+- Shows a preview before any changes. Nothing is selected by default.
+- Keeps the old account's items by default. Removing selected items from the old account requires entering its `@handle`; each item is removed only after it is present on the new account.
+- Supports stopping a job and resuming after X rate limits. Completed X actions are not automatically rolled back.
+- Detects Chinese or English from the browser on first visit. The language switch in the page overrides that choice and is remembered locally.
+
+## Run locally
+
+Requires **Node.js 24** and **pnpm**.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm run dev
 ```
 
-打开 `http://127.0.0.1:5199/`。生产构建可用 `pnpm run build`，再用 `pnpm run preview` 在同一端口预览。
+Open <http://127.0.0.1:5199/>. For a production build, run `pnpm run build` followed by `pnpm run preview` on the same local address.
 
-如需用 Cloudflare Worker 托管页面、由独立 Node 服务执行迁移，请按 [Cloudflare 部署说明](docs/cloudflare.md) 配置。
+## Transfer safely
 
-## 使用
+1. Sign in to the old and new X accounts in separate browser profiles or sessions. For each account, copy an authenticated X request **as curl** from the browser's Network panel and paste it into the matching form. You can also copy the **values** of `auth_token` and `ct0` from Application → Cookies → `https://x.com`.
+2. Connect both accounts. The curl input is cleared after parsing; cookie values are cleared from the form after a successful connection. Cookies remain only in the Node process. The current tab stores random session IDs in `sessionStorage` so it can restore a job after refresh.
+3. Choose follows, bookmarks, or both, then scan. A failed scan cannot start a transfer. Check the counts and preview, especially if X returns an uncertain end of list.
+4. Select the items to move. Existing destination items cannot be selected. If you also want to remove transferred items from the old account, select that option and type the old account's `@handle` to confirm.
+5. Start the transfer. You can stop it. On HTTP 429, the job waits until the time provided by X, or 15 minutes when none is provided; you can also resume or stop it manually.
 
-1. 分别登录旧账号和新账号。在各自浏览器会话的开发者工具中，从 Network 里选一个带 Cookie 的 X 请求并“复制为 curl”，粘贴到对应账号的输入框后直接点击“连接账号”；也可以先点击“解析 curl”检查提取结果。还可以打开“Application / 应用 → Cookies → https://x.com”，手动复制 `auth_token` 和 `ct0` 的**值**。两个账号可使用不同的浏览器配置文件。
-2. 在工具中分别连接旧账号和新账号。curl 文本在解析成功后清空；连接成功后，Cookie 值只保存在本地 Node.js 进程内，页面把随机会话 ID 保存在当前标签页的 `sessionStorage`，刷新后会向本地服务验证并恢复账号。Cookie 不会写入浏览器存储，输入框在连接成功后清空。关闭或重启服务后需重新连接。
-3. 选择关注、收藏或两者，执行扫描。工具会读取两个账号的完整所选列表，计算目标账号已有和待新增数量。扫描失败时不会开始迁移。
-4. 扫描完成后在关注和收藏预览中勾选要迁移的项目，默认都不勾选，新账号已有的项目不能勾选。每个标签页可全选或取消全选，切换标签页会保留勾选；开始迁移时会同时提交两类勾选项。若选择移除旧账号内容，还需要输入旧账号的 `@用户名`，只会在目标账号确认拥有本次勾选项后移除。
-5. 任务可停止；扫描中的当前请求会被中断，刷新页面后仍能恢复并停止当前任务。迁移遇到 X 的 429 限流会暂停，并优先按响应头指定的时间自动继续；没有时间提示时默认等待 15 分钟，也可手动继续或停止。已执行的 X 操作不会自动回滚。
+## How it works
 
-## 网络和接口
-
-- 网络代理留空时依次使用 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、Windows 系统代理；也可手动填写 HTTP(S) 代理地址。填写 `direct` 可强制直连。
-- 工具会从 X 当前网页脚本发现 GraphQL 查询 ID，并优先使用 X 网页的 `Viewer` 查询验证账号。X 更新网页后若自动发现失败，可以在高级设置中手动填写 `Viewer`、`UserByScreenName`、`Following`、`Bookmarks`、`CreateBookmark`、`DeleteBookmark` 的查询 ID。ID 位于对应 Network 请求 URL 的 `/graphql/` 后面。修改后请重新连接账号。
-- 扫描关注列表时使用较大的每页数量来减少请求次数；同一账号的关注与收藏列表请求之间至少间隔 2 秒。X 的网页接口仍可能变化或限制请求频率；工具会显示失败原因，遇到响应结构变化时会停止扫描，避免使用不完整列表执行迁移。
-- 扫描进度显示两个账号的已读数量。关注总数取自 X 账号资料；X 当前的收藏列表接口没有返回总数，收藏总数需在扫描结束后确定。
-- X 未明确标记列表结束时，未知总数的列表若连续两页无新增项目，或空页重复同一游标，会按末尾处理并提示核对；已知关注总数却未读够时仍停止扫描，避免漏读后迁移。
-- 迁移任务和会话只存在于本地进程内。重启服务后需重新连接和扫描。默认仅监听 `127.0.0.1`。
-
-## 验证
-
-```bash
-pnpm run build
-pnpm run test
+```mermaid
+flowchart LR
+  Browser[Vue Vapor UI] -->|same-origin /api| Node[Hono Node API]
+  Browser -->|optional hosted UI| Worker[Hono Cloudflare Worker]
+  Worker -->|shared-secret proxy| Node
+  Node -->|cookie sessions| X[X web API]
 ```
 
-测试用模拟 X 客户端验证去重、移除确认和“先迁入后移除”的顺序，不会操作真实账号。
+The local Vite server and the separate Node service use the same Hono API routes. The Worker serves the built page and forwards API calls to the Node service. Sessions and jobs are held in Node memory; restarting it requires reconnecting and scanning again. Local development listens on `127.0.0.1` by default.
+
+For hosted deployment, see [Cloudflare Worker + Node API](docs/cloudflare.md). The default `workers.dev` page is publicly reachable until you add access control, such as Cloudflare Access. The shared proxy secret authenticates the Worker to Node; it does not authenticate visitors to the Worker.
+
+## Network and X API notes
+
+- With an empty proxy field, the Node service checks `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, then the Windows system proxy. You can enter an HTTP(S) proxy, or `direct` to force a direct connection.
+- Query IDs are discovered from current X web scripts. If discovery fails after X changes its web client, Advanced settings accepts the ID from a matching `/graphql/` request in X's Network panel. Reconnect after changing these settings.
+- Scanning follows uses larger pages and spaces list requests for the same account by at least two seconds. X can still change response formats or rate limits. The tool stops on incomplete or unexpected lists rather than transferring a partial result.
+- X's current bookmarks endpoint does not return a total count. The total becomes known after scanning. Some lists can end without an explicit marker; the page asks you to verify the count and preview in that case.
+
+## Checks
+
+```bash
+pnpm run typecheck
+pnpm run build
+pnpm run test
+pnpm run cf:dry-run
+```
+
+Tests use simulated X clients and do not change real accounts. The Cloudflare dry run builds and checks deployment output without publishing it.
+
+This is an independent community project and is not affiliated with X. It uses X's web API, which may change without notice.
+
+## License
+
+[MIT](LICENSE)

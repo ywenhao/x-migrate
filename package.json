@@ -3,7 +3,15 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "把 X.com（Twitter）的关注与收藏迁移到另一个账号，可选移除旧账号的关注/收藏。使用 Vue Vapor 构建。",
+  "description": "Preview and transfer follows and bookmarks between X accounts.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ywenhao/x-migrate.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
@@ -13,18 +21,23 @@
     "cf:dry-run": "pnpm run build && wrangler deploy --dry-run",
     "cf:deploy": "pnpm run build && wrangler deploy",
     "typecheck": "vue-tsc --noEmit",
-    "test": "node --experimental-transform-types --test"
+    "test": "node --experimental-transform-types --test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.17",
     "hono": "^4.13.8",
     "linkedom": "^0.18.13",
     "undici": "^8.11.0",
     "vue": "3.6.0-rc.9",
+    "vue-i18n": "^11.4.12",
     "x-client-transaction-id": "0.3.1"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
     "@vitejs/plugin-vue": "^6.0.9",
+    "prettier": "^3.9.9",
     "typescript": "^5.6.3",
     "vite": "^8.3.0",
     "vue-tsc": "^3.1.4",

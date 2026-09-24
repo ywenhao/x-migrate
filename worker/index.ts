@@ -7,28 +7,65 @@ type Bindings = {
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
+const errorText = (request: Request, en: string, zh: string) =>
+  request.headers.get('accept-language')?.toLowerCase().startsWith('en') ? en : zh
 
 app.all('/api/*', async (context) => {
   const browserOrigin = context.req.header('origin')
   if (browserOrigin && browserOrigin !== new URL(context.req.url).origin) {
-    return context.json({ error: '不接受其他网站发起的请求。' }, 403)
+    return context.json(
+      {
+        error: errorText(
+          context.req.raw,
+          'Requests from other sites are not accepted.',
+          '不接受其他网站发起的请求。',
+        ),
+      },
+      403,
+    )
   }
   const configuredOrigin = context.env.API_ORIGIN
   const secret = context.env.API_PROXY_SECRET
   if (!configuredOrigin || !secret || secret.length < 32) {
-    return context.json({ error: 'API 转发尚未配置。' }, 503)
+    return context.json(
+      {
+        error: errorText(
+          context.req.raw,
+          'API forwarding is not configured.',
+          'API 转发尚未配置。',
+        ),
+      },
+      503,
+    )
   }
 
   let target: URL
   try {
     const origin = new URL(configuredOrigin)
-    const localHttp = origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
-    if ((!localHttp && origin.protocol !== 'https:') || origin.pathname !== '/' ||
-      origin.search || origin.hash || origin.username || origin.password) throw new Error('Invalid API origin')
+    const localHttp =
+      origin.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)
+    if (
+      (!localHttp && origin.protocol !== 'https:') ||
+      origin.pathname !== '/' ||
+      origin.search ||
+      origin.hash ||
+      origin.username ||
+      origin.password
+    )
+      throw new Error('Invalid API origin')
     const incoming = new URL(context.req.url)
     target = new URL(incoming.pathname + incoming.search, origin)
   } catch {
-    return context.json({ error: 'API_ORIGIN 必须是 HTTPS 站点根地址。' }, 503)
+    return context.json(
+      {
+        error: errorText(
+          context.req.raw,
+          'API_ORIGIN must be an HTTPS site root.',
+          'API_ORIGIN 必须是 HTTPS 站点根地址。',
+        ),
+      },
+      503,
+    )
   }
 
   const headers = new Headers(context.req.raw.headers)
@@ -45,7 +82,16 @@ app.all('/api/*', async (context) => {
   try {
     return await fetch(upstream)
   } catch {
-    return context.json({ error: 'Node API 暂不可用。' }, 502)
+    return context.json(
+      {
+        error: errorText(
+          context.req.raw,
+          'The Node API is temporarily unavailable.',
+          'Node API 暂不可用。',
+        ),
+      },
+      502,
+    )
   }
 })
 

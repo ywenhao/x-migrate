@@ -19,12 +19,17 @@ test('Worker 提供静态页面，只转发同源 API 请求', async () => {
   const env = workerEnv()
   const asset = await worker.fetch(new Request(`${workerOrigin}/`), env)
   assert.equal(await asset.text(), 'asset served')
-  const crossSite = await worker.fetch(new Request(`${workerOrigin}/api/health`, {
-    headers: { origin: 'https://other.example.com' },
-  }), env)
+  const crossSite = await worker.fetch(
+    new Request(`${workerOrigin}/api/health`, {
+      headers: { origin: 'https://other.example.com', 'accept-language': 'en-US' },
+    }),
+    env,
+  )
   assert.equal(crossSite.status, 403)
+  assert.match((await crossSite.json()).error, /other sites/)
   const unconfigured = await worker.fetch(new Request(`${workerOrigin}/api/health`), {
-    ...env, API_ORIGIN: undefined,
+    ...env,
+    API_ORIGIN: undefined,
   })
   assert.equal(unconfigured.status, 503)
 
@@ -32,14 +37,23 @@ test('Worker 提供静态页面，只转发同源 API 请求', async () => {
   let upstream
   globalThis.fetch = async (request) => {
     upstream = request
-    return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } })
+    return new Response(JSON.stringify({ ok: true }), {
+      headers: { 'content-type': 'application/json' },
+    })
   }
   try {
-    const response = await worker.fetch(new Request(`${workerOrigin}/api/health?check=1`, {
-      method: 'POST',
-      headers: { authorization: 'Bearer browser-value', origin: workerOrigin, 'content-type': 'application/json' },
-      body: '{"check":true}',
-    }), env)
+    const response = await worker.fetch(
+      new Request(`${workerOrigin}/api/health?check=1`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer browser-value',
+          origin: workerOrigin,
+          'content-type': 'application/json',
+        },
+        body: '{"check":true}',
+      }),
+      env,
+    )
     assert.equal(response.status, 200)
     assert.equal(upstream.url, 'https://api.example.com/api/health?check=1')
     assert.equal(upstream.headers.get('x-x-migrate-proxy-key'), proxySecret)
@@ -62,14 +76,21 @@ test('独立 Node API 只接受共享密钥', async () => {
     const denied = await fetch(`${base}/api/health`, { headers: { origin: workerOrigin } })
     assert.equal(denied.status, 403)
     const wrong = await fetch(`${base}/api/health`, {
-      headers: { 'x-x-migrate-proxy-key': 'wrong-key' },
+      headers: { 'x-x-migrate-proxy-key': 'wrong-key', 'accept-language': 'en-US' },
     })
     assert.equal(wrong.status, 403)
+    assert.match((await wrong.json()).error, /Proxy authentication failed/)
     const allowed = await fetch(`${base}/api/health`, {
       headers: { origin: workerOrigin, 'x-x-migrate-proxy-key': proxySecret },
     })
     assert.equal(allowed.status, 200)
     assert.deepEqual(await allowed.json(), { ok: true })
+    const oversized = await fetch(`${base}/api/connect`, {
+      method: 'POST',
+      headers: { 'x-x-migrate-proxy-key': proxySecret },
+      body: 'x'.repeat(2 * 1024 * 1024 + 1),
+    })
+    assert.equal(oversized.status, 413)
   } finally {
     await new Promise((resolve) => server.close(resolve))
     if (previousSecret === undefined) delete process.env.X_MIGRATE_PROXY_SECRET

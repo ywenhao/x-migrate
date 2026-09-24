@@ -1,0 +1,8 @@
+node_modules/
+dist/
+output/
+.playwright-mcp/
+.wrangler/
+pnpm-lock.yaml
+server/features.json
+docs/preview.png

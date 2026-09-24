@@ -41,8 +41,7 @@ async function readWindowsSystemProxy(): Promise<string | null> {
   }
   let value: string | null = null
   try {
-    const key =
-      'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+    const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
     const { stdout } = await execFileAsync('reg', ['query', key])
     const enableMatch = stdout.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i)
     const serverMatch = stdout.match(/ProxyServer\s+REG_SZ\s+(.+)/i)
@@ -71,9 +70,7 @@ async function readWindowsSystemProxy(): Promise<string | null> {
  * @param userProxy 前端传入的代理字符串，可为空
  *   - 传 "direct" 或 "none" 表示强制直连
  */
-export async function resolveProxyUrl(
-  userProxy?: string | null,
-): Promise<string | null> {
+export async function resolveProxyUrl(userProxy?: string | null): Promise<string | null> {
   const trimmed = (userProxy || '').trim().toLowerCase()
   if (trimmed === 'direct' || trimmed === 'none' || trimmed === '直连') {
     return null

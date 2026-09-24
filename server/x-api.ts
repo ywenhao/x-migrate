@@ -9,7 +9,14 @@ const X_ORIGIN = 'https://x.com'
 const ASSET_ORIGIN = 'https://abs.twimg.com'
 const BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
-const OPERATIONS = new Set(['Viewer', 'UserByScreenName', 'Following', 'Bookmarks', 'CreateBookmark', 'DeleteBookmark'])
+const OPERATIONS = new Set([
+  'Viewer',
+  'UserByScreenName',
+  'Following',
+  'Bookmarks',
+  'CreateBookmark',
+  'DeleteBookmark',
+])
 const DISCOVERY_TTL = 60 * 60 * 1000
 const MAX_PAGES = 500
 const MAX_STALE_PAGES = 10
@@ -56,9 +63,11 @@ const FEATURE_KEYS = [
   'responsive_web_grok_community_note_auto_translation_is_enabled',
   'responsive_web_enhance_cards_enabled',
 ] as const
-const graphqlFeatures = Object.fromEntries(FEATURE_KEYS
-  .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
-  .map((key) => [key, (features as Record<string, unknown>)[key]]))
+const graphqlFeatures = Object.fromEntries(
+  FEATURE_KEYS.filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean').map(
+    (key) => [key, (features as Record<string, unknown>)[key]],
+  ),
+)
 const PROFILE_FEATURE_KEYS = [
   'hidden_profile_subscriptions_enabled',
   'profile_label_improvements_pcf_label_in_post_enabled',
@@ -74,9 +83,11 @@ const PROFILE_FEATURE_KEYS = [
   'responsive_web_graphql_timeline_navigation_enabled',
 ] as const
 const profileFeatures = {
-  ...Object.fromEntries(PROFILE_FEATURE_KEYS
-    .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
-    .map((key) => [key, (features as Record<string, unknown>)[key]])),
+  ...Object.fromEntries(
+    PROFILE_FEATURE_KEYS.filter(
+      (key) => typeof (features as Record<string, unknown>)[key] === 'boolean',
+    ).map((key) => [key, (features as Record<string, unknown>)[key]]),
+  ),
   subscriptions_feature_can_gift_premium: true,
 }
 const VIEWER_FEATURE_KEYS = [
@@ -88,11 +99,14 @@ const VIEWER_FEATURE_KEYS = [
   'creator_subscriptions_tweet_preview_api_enabled',
   'responsive_web_graphql_timeline_navigation_enabled',
 ] as const
-const viewerFeatures = Object.fromEntries(VIEWER_FEATURE_KEYS
-  .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
-  .map((key) => [key, (features as Record<string, unknown>)[key]]))
+const viewerFeatures = Object.fromEntries(
+  VIEWER_FEATURE_KEYS.filter(
+    (key) => typeof (features as Record<string, unknown>)[key] === 'boolean',
+  ).map((key) => [key, (features as Record<string, unknown>)[key]]),
+)
 
-export type Operation = 'Viewer' | 'UserByScreenName' | 'Following' | 'Bookmarks' | 'CreateBookmark' | 'DeleteBookmark'
+export type Operation =
+  'Viewer' | 'UserByScreenName' | 'Following' | 'Bookmarks' | 'CreateBookmark' | 'DeleteBookmark'
 export type QueryIds = Partial<Record<Operation, string>>
 
 export interface Account {
@@ -117,7 +131,12 @@ let discoveredIds: QueryIds = {}
 let discoveredAt = 0
 
 export class XApiError extends Error {
-  constructor(message: string, public readonly status?: number, public readonly retryAt: number | null = null) {
+  constructor(
+    message: string,
+    public readonly status?: number,
+    public readonly retryAt: number | null = null,
+    public readonly englishMessage = message,
+  ) {
     super(message)
     this.name = 'XApiError'
   }
@@ -143,7 +162,7 @@ function rateLimitReset(headers: Record<string, string | string[] | undefined>):
 
 function asObject(value: unknown): JsonObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as JsonObject
+    ? (value as JsonObject)
     : {}
 }
 
@@ -184,11 +203,17 @@ function itemContents(entry: JsonObject): JsonObject[] {
   return result
 }
 
-function bottomCursor(entries: JsonObject[]): { value: string | null; stopOnEmptyResponse: boolean } {
+function bottomCursor(entries: JsonObject[]): {
+  value: string | null
+  stopOnEmptyResponse: boolean
+} {
   for (const entry of entries) {
     const content = asObject(entry.content)
     if (content.cursorType === 'Bottom') {
-      return { value: string(content.value) || null, stopOnEmptyResponse: content.stopOnEmptyResponse === true }
+      return {
+        value: string(content.value) || null,
+        stopOnEmptyResponse: content.stopOnEmptyResponse === true,
+      }
     }
   }
   return { value: null, stopOnEmptyResponse: false }
@@ -197,7 +222,8 @@ function bottomCursor(entries: JsonObject[]): { value: string | null; stopOnEmpt
 function userItem(raw: unknown): MigrationItem | null {
   const user = asObject(raw)
   const id = string(user.rest_id)
-  const screenName = string(at(user, 'core', 'screen_name')) || string(at(user, 'legacy', 'screen_name'))
+  const screenName =
+    string(at(user, 'core', 'screen_name')) || string(at(user, 'legacy', 'screen_name'))
   if (!id || !screenName) return null
   const name = string(at(user, 'core', 'name')) || string(at(user, 'legacy', 'name')) || screenName
   return {
@@ -205,8 +231,10 @@ function userItem(raw: unknown): MigrationItem | null {
     label: name,
     detail: `@${screenName}`,
     url: `${X_ORIGIN}/${encodeURIComponent(screenName)}`,
-    avatarUrl: string(at(user, 'avatar', 'image_url')) ||
-      string(at(user, 'legacy', 'profile_image_url_https')) || null,
+    avatarUrl:
+      string(at(user, 'avatar', 'image_url')) ||
+      string(at(user, 'legacy', 'profile_image_url_https')) ||
+      null,
   }
 }
 
@@ -215,38 +243,52 @@ function tweetItem(raw: unknown): MigrationItem | null {
   if (tweet.__typename === 'TweetWithVisibilityResults') tweet = asObject(tweet.tweet)
   const id = string(tweet.rest_id)
   if (!id) return null
-  const text = string(at(tweet, 'note_tweet', 'note_tweet_results', 'result', 'text')) ||
-    string(at(tweet, 'legacy', 'full_text')) || '无法显示推文内容'
+  const text =
+    string(at(tweet, 'note_tweet', 'note_tweet_results', 'result', 'text')) ||
+    string(at(tweet, 'legacy', 'full_text')) ||
+    '无法显示推文内容'
   const author = asObject(at(tweet, 'core', 'user_results', 'result'))
-  const handle = string(at(author, 'core', 'screen_name')) ||
-    string(at(author, 'legacy', 'screen_name'))
+  const handle =
+    string(at(author, 'core', 'screen_name')) || string(at(author, 'legacy', 'screen_name'))
   return {
     id,
     label: text,
     detail: handle ? `@${handle}` : `推文 ${id}`,
     url: `${X_ORIGIN}/i/web/status/${id}`,
-    avatarUrl: string(at(author, 'avatar', 'image_url')) ||
-      string(at(author, 'legacy', 'profile_image_url_https')) || null,
+    avatarUrl:
+      string(at(author, 'avatar', 'image_url')) ||
+      string(at(author, 'legacy', 'profile_image_url_https')) ||
+      null,
   }
 }
 
-export function parseTimeline(body: unknown, kind: 'following' | 'bookmarks'): {
+export function parseTimeline(
+  body: unknown,
+  kind: 'following' | 'bookmarks',
+): {
   items: MigrationItem[]
   cursor: string | null
 } {
-  const instructions = kind === 'following'
-    ? at(body, 'data', 'user', 'result', 'timeline', 'timeline', 'instructions')
-    : at(body, 'data', 'bookmark_timeline_v2', 'timeline', 'instructions')
+  const instructions =
+    kind === 'following'
+      ? at(body, 'data', 'user', 'result', 'timeline', 'timeline', 'instructions')
+      : at(body, 'data', 'bookmark_timeline_v2', 'timeline', 'instructions')
   if (!Array.isArray(instructions)) {
-    throw new XApiError(`X 返回的${kind === 'following' ? '关注' : '收藏'}列表结构已变化，无法安全读取。`)
+    throw new XApiError(
+      `X 返回的${kind === 'following' ? '关注' : '收藏'}列表结构已变化，无法安全读取。`,
+      undefined,
+      null,
+      `X changed the ${kind === 'following' ? 'following' : 'bookmarks'} response. The list cannot be read safely.`,
+    )
   }
   const entries = entriesFromInstructions(instructions)
   const items: MigrationItem[] = []
   for (const entry of entries) {
     for (const content of itemContents(entry)) {
-      const raw = kind === 'following'
-        ? at(content, 'user_results', 'result')
-        : at(content, 'tweet_results', 'result')
+      const raw =
+        kind === 'following'
+          ? at(content, 'user_results', 'result')
+          : at(content, 'tweet_results', 'result')
       const parsed = kind === 'following' ? userItem(raw) : tweetItem(raw)
       if (parsed) items.push(parsed)
     }
@@ -278,7 +320,9 @@ function scriptUrls(text: string): string[] {
     try {
       const url = new URL(match[1], X_ORIGIN)
       if (url.origin === ASSET_ORIGIN || url.origin === X_ORIGIN) found.add(url.toString())
-    } catch { /* Ignore malformed URLs from page content. */ }
+    } catch {
+      /* Ignore malformed URLs from page content. */
+    }
   }
   return [...found]
 }
@@ -317,15 +361,24 @@ function safeErrorMessage(body: unknown): string {
   return ''
 }
 
-export function validateSessionInput(authToken: unknown, ct0: unknown): {
+export function validateSessionInput(
+  authToken: unknown,
+  ct0: unknown,
+): {
   authToken: string
   ct0: string
 } {
   const token = string(authToken).trim()
   const csrf = string(ct0).trim()
-  const valid = (value: string) => value.length >= 8 && value.length <= 512 && !/[\s;,\r\n]/.test(value)
+  const valid = (value: string) =>
+    value.length >= 8 && value.length <= 512 && !/[\s;,\r\n]/.test(value)
   if (!valid(token) || !valid(csrf)) {
-    throw new XApiError('请填写有效的 auth_token 和 ct0 Cookie 值。')
+    throw new XApiError(
+      '请填写有效的 auth_token 和 ct0 Cookie 值。',
+      undefined,
+      null,
+      'Enter valid auth_token and ct0 cookie values.',
+    )
   }
   return { authToken: token, ct0: csrf }
 }
@@ -336,7 +389,13 @@ export function validateQueryIds(input: unknown): QueryIds {
   for (const operation of OPERATIONS) {
     const value = string(raw[operation]).trim()
     if (!value) continue
-    if (!/^[\w-]{8,80}$/.test(value)) throw new XApiError(`${operation} 查询 ID 格式无效。`)
+    if (!/^[\w-]{8,80}$/.test(value))
+      throw new XApiError(
+        `${operation} 查询 ID 格式无效。`,
+        undefined,
+        null,
+        `Invalid ${operation} query ID.`,
+      )
     result[operation as Operation] = value
   }
   return result
@@ -355,12 +414,22 @@ export class XClient {
     this.dispatcher = dispatcher
   }
 
-  static async create(authToken: string, ct0: string, proxy: string, overrides: QueryIds): Promise<XClient> {
+  static async create(
+    authToken: string,
+    ct0: string,
+    proxy: string,
+    overrides: QueryIds,
+  ): Promise<XClient> {
     const chosen = proxy.trim()
     if (chosen && !['direct', 'none', '直连'].includes(chosen.toLowerCase())) {
       const url = new URL(/^[a-z]+:\/\//i.test(chosen) ? chosen : `http://${chosen}`)
       if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) {
-        throw new XApiError('代理只支持 HTTP 或 HTTPS 地址。')
+        throw new XApiError(
+          '代理只支持 HTTP 或 HTTPS 地址。',
+          undefined,
+          null,
+          'Only HTTP and HTTPS proxy URLs are supported.',
+        )
       }
     }
     const proxyUrl = await resolveProxyUrl(chosen)
@@ -401,8 +470,9 @@ export class XClient {
           }
           internal.getIndices = async (page) => {
             const script = await this.text(internal.getOnDemandFileUrl(page), false)
-            const indices = [...script.matchAll(/\(\w\[(\d{1,2})\],\s*16\)/g)]
-              .map((match) => Number(match[1]))
+            const indices = [...script.matchAll(/\(\w\[(\d{1,2})\],\s*16\)/g)].map((match) =>
+              Number(match[1]),
+            )
             if (indices.length < 2) throw new Error('X 签名脚本格式已变化。')
             return [indices[0], indices.slice(1)]
           }
@@ -418,18 +488,32 @@ export class XClient {
     return await this.transactionPromise
   }
 
-  private async signedHeaders(method: string, path: string, json = false): Promise<Record<string, string>> {
+  private async signedHeaders(
+    method: string,
+    path: string,
+    json = false,
+  ): Promise<Record<string, string>> {
     const headers = this.headers(json)
     const transaction = await this.transaction()
     if (transaction) {
       try {
-        headers['x-client-transaction-id'] = await transaction.generateTransactionId(method, path.split('?')[0])
-      } catch { /* The API response will report if a signature is required. */ }
+        headers['x-client-transaction-id'] = await transaction.generateTransactionId(
+          method,
+          path.split('?')[0],
+        )
+      } catch {
+        /* The API response will report if a signature is required. */
+      }
     }
     return headers
   }
 
-  private async json(method: 'GET' | 'POST', path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+  private async json(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const headers = path.startsWith('/i/api/graphql/')
       ? await this.signedHeaders(method, path, body !== undefined)
       : this.headers(body !== undefined)
@@ -443,26 +527,47 @@ export class XClient {
     })
     const raw = await response.body.text()
     let parsed: unknown
-    try { parsed = JSON.parse(raw) } catch { parsed = {} }
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = {}
+    }
     if (response.statusCode === 401 || response.statusCode === 403) {
-      throw new XApiError('X 拒绝了会话。请重新复制 auth_token 和 ct0，或确认账号没有被限制。', response.statusCode)
+      throw new XApiError(
+        'X 拒绝了会话。请重新复制 auth_token 和 ct0，或确认账号没有被限制。',
+        response.statusCode,
+        null,
+        'X rejected the session. Copy fresh auth_token and ct0 values and check that the account is unrestricted.',
+      )
     }
     if (response.statusCode === 429) {
-      throw new XApiError('X 接口已限流。请稍后重新扫描或迁移。', 429, rateLimitReset(response.headers))
+      throw new XApiError(
+        'X 接口已限流。请稍后重新扫描或迁移。',
+        429,
+        rateLimitReset(response.headers),
+        'X rate limited this request. Scan or transfer again later.',
+      )
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const detail = safeErrorMessage(parsed)
       const endpoint = path.startsWith('/i/api/graphql/') ? path.split('/')[5] : path.split('?')[0]
-      throw new XApiError(`X 接口 ${endpoint} 返回 ${response.statusCode}${detail ? `：${detail}` : ''}`, response.statusCode)
+      throw new XApiError(
+        `X 接口 ${endpoint} 返回 ${response.statusCode}${detail ? `：${detail}` : ''}`,
+        response.statusCode,
+        null,
+        `X endpoint ${endpoint} returned ${response.statusCode}${detail ? `: ${detail}` : ''}`,
+      )
     }
     const detail = safeErrorMessage(parsed)
     if (detail) {
       // Viewer can include errors for optional fields while still returning
       // the authenticated user needed for this tool.
       const viewer = asObject(at(parsed, 'data', 'viewer', 'user_results', 'result'))
-      const validViewer = string(viewer.rest_id) &&
+      const validViewer =
+        string(viewer.rest_id) &&
         (string(at(viewer, 'core', 'screen_name')) || string(at(viewer, 'legacy', 'screen_name')))
-      if (!/\/Viewer(?:\?|$)/.test(path) || !validViewer) throw new XApiError(`X 接口错误：${detail}`)
+      if (!/\/Viewer(?:\?|$)/.test(path) || !validViewer)
+        throw new XApiError(`X 接口错误：${detail}`, undefined, null, `X API error: ${detail}`)
     }
     return parsed
   }
@@ -470,21 +575,41 @@ export class XClient {
   async verify(): Promise<Account> {
     const accountFrom = (value: unknown, expectedScreenName?: string): Account | null => {
       const user = asObject(value)
-      const id = string(user.rest_id) || string(user.id_str) || string(user.user_id) ||
-        (typeof user.id === 'number' && Number.isSafeInteger(user.id) ? String(user.id) : string(user.id))
-      const handle = string(at(user, 'core', 'screen_name')) ||
-        string(at(user, 'legacy', 'screen_name')) || string(user.screen_name) || string(user.screenName)
-      if (!id || !handle || (expectedScreenName && handle.toLowerCase() !== expectedScreenName.toLowerCase())) return null
+      const id =
+        string(user.rest_id) ||
+        string(user.id_str) ||
+        string(user.user_id) ||
+        (typeof user.id === 'number' && Number.isSafeInteger(user.id)
+          ? String(user.id)
+          : string(user.id))
+      const handle =
+        string(at(user, 'core', 'screen_name')) ||
+        string(at(user, 'legacy', 'screen_name')) ||
+        string(user.screen_name) ||
+        string(user.screenName)
+      if (
+        !id ||
+        !handle ||
+        (expectedScreenName && handle.toLowerCase() !== expectedScreenName.toLowerCase())
+      )
+        return null
       return {
         id,
         screenName: handle,
-        name: string(at(user, 'core', 'name')) || string(at(user, 'legacy', 'name')) ||
-          string(user.name) || handle,
-        avatarUrl: string(at(user, 'avatar', 'image_url')) ||
+        name:
+          string(at(user, 'core', 'name')) ||
+          string(at(user, 'legacy', 'name')) ||
+          string(user.name) ||
+          handle,
+        avatarUrl:
+          string(at(user, 'avatar', 'image_url')) ||
           string(at(user, 'legacy', 'profile_image_url_https')) ||
-          string(user.profile_image_url_https) || null,
-        followingCount: nonNegativeCount(at(user, 'relationship_counts', 'following')) ??
-          nonNegativeCount(at(user, 'legacy', 'friends_count')) ?? nonNegativeCount(user.friends_count),
+          string(user.profile_image_url_https) ||
+          null,
+        followingCount:
+          nonNegativeCount(at(user, 'relationship_counts', 'following')) ??
+          nonNegativeCount(at(user, 'legacy', 'friends_count')) ??
+          nonNegativeCount(user.friends_count),
       }
     }
 
@@ -492,31 +617,50 @@ export class XClient {
     // The older account REST endpoints can return 404 for cookie sessions.
     let viewerError: XApiError | null = null
     try {
-      const viewer = await this.graphqlGet('Viewer',
+      const viewer = await this.graphqlGet(
+        'Viewer',
         { withCommunitiesMemberships: (features as Record<string, unknown>).c9s_enabled === true },
         viewerFeatures,
         {
           isDelegate: false,
-          withAuxiliaryUserLabels: (features as Record<string, unknown>).blue_business_multi_affiliates_ui_enabled === true,
-        })
+          withAuxiliaryUserLabels:
+            (features as Record<string, unknown>).blue_business_multi_affiliates_ui_enabled ===
+            true,
+        },
+      )
       const account = accountFrom(at(viewer, 'data', 'viewer', 'user_results', 'result'))
       if (account) {
         try {
-          const profile = await this.graphqlGet('UserByScreenName',
+          const profile = await this.graphqlGet(
+            'UserByScreenName',
             { screen_name: account.screenName, withGrokTranslatedBio: true },
             profileFeatures,
-            { withPayments: false, withAuxiliaryUserLabels: true })
+            { withPayments: false, withAuxiliaryUserLabels: true },
+          )
           const detailed = accountFrom(at(profile, 'data', 'user', 'result'), account.screenName)
           if (detailed?.id === account.id && detailed.followingCount !== null) {
             account.followingCount = detailed.followingCount
           }
-        } catch { /* The Viewer identity remains valid if the optional profile request fails. */ }
+        } catch {
+          /* The Viewer identity remains valid if the optional profile request fails. */
+        }
         return account
       }
-      viewerError = new XApiError('Viewer 未返回账号身份。')
+      viewerError = new XApiError(
+        'Viewer 未返回账号身份。',
+        undefined,
+        null,
+        'Viewer did not return an account identity.',
+      )
     } catch (error) {
-      if (!(error instanceof XApiError) || error.status === 401 || error.status === 403 ||
-        error.status === 429 || (error.status !== undefined && error.status >= 500)) throw error
+      if (
+        !(error instanceof XApiError) ||
+        error.status === 401 ||
+        error.status === 403 ||
+        error.status === 429 ||
+        (error.status !== undefined && error.status >= 500)
+      )
+        throw error
       viewerError = error
     }
 
@@ -525,32 +669,59 @@ export class XClient {
       settings = await this.json('GET', '/i/api/1.1/account/settings.json')
     } catch (error) {
       if (viewerError && error instanceof XApiError) {
-        throw new XApiError(`账号验证失败：${viewerError.message}；备用验证失败：${error.message}`, error.status)
+        throw new XApiError(
+          `账号验证失败：${viewerError.message}；备用验证失败：${error.message}`,
+          error.status,
+          null,
+          `Account verification failed: ${viewerError.englishMessage}; fallback verification failed: ${error.englishMessage}`,
+        )
       }
       throw error
     }
-    const screenName = string(asObject(settings).screen_name) || string(asObject(settings).screenName)
-    if (!screenName) throw new XApiError('X 未返回账号用户名，请检查会话是否有效。')
+    const screenName =
+      string(asObject(settings).screen_name) || string(asObject(settings).screenName)
+    if (!screenName)
+      throw new XApiError(
+        'X 未返回账号用户名，请检查会话是否有效。',
+        undefined,
+        null,
+        'X did not return an account handle. Check the session.',
+      )
     const settingsAccount = accountFrom(settings, screenName)
     if (settingsAccount) return settingsAccount
 
     // The settings response often contains only screen_name. Try the small
     // profile endpoint before loading X's scripts to discover a GraphQL ID.
     try {
-      const user = await this.json('GET', `/i/api/1.1/users/show.json?screen_name=${encodeURIComponent(screenName)}`)
+      const user = await this.json(
+        'GET',
+        `/i/api/1.1/users/show.json?screen_name=${encodeURIComponent(screenName)}`,
+      )
       const account = accountFrom(user, screenName)
       if (account) return account
     } catch (error) {
-      if (!(error instanceof XApiError) || error.status === 429 ||
-        (error.status !== undefined && error.status >= 500)) throw error
+      if (
+        !(error instanceof XApiError) ||
+        error.status === 429 ||
+        (error.status !== undefined && error.status >= 500)
+      )
+        throw error
     }
 
-    const user = await this.graphqlGet('UserByScreenName',
+    const user = await this.graphqlGet(
+      'UserByScreenName',
       { screen_name: screenName, withGrokTranslatedBio: true },
       profileFeatures,
-      { withPayments: false, withAuxiliaryUserLabels: true })
+      { withPayments: false, withAuxiliaryUserLabels: true },
+    )
     const account = accountFrom(at(user, 'data', 'user', 'result'), screenName)
-    if (!account) throw new XApiError('X 已验证会话，但无法读取账号 ID，不能安全扫描关注列表。')
+    if (!account)
+      throw new XApiError(
+        'X 已验证会话，但无法读取账号 ID，不能安全扫描关注列表。',
+        undefined,
+        null,
+        'X verified the session but did not return an account ID. Following cannot be scanned safely.',
+      )
     return account
   }
 
@@ -562,7 +733,12 @@ export class XClient {
     })
     if (response.statusCode !== 200) {
       await response.body.dump()
-      throw new XApiError(`无法读取 X 网页或脚本（${response.statusCode}）。`, response.statusCode)
+      throw new XApiError(
+        `无法读取 X 网页或脚本（${response.statusCode}）。`,
+        response.statusCode,
+        null,
+        `Could not read the X page or script (${response.statusCode}).`,
+      )
     }
     return await response.body.text()
   }
@@ -584,7 +760,11 @@ export class XClient {
       return priority(a) - priority(b)
     })
     const seen = new Set<string>()
-    while (queue.length > 0 && seen.size < MAX_ASSETS && Object.keys(found).length < OPERATIONS.size) {
+    while (
+      queue.length > 0 &&
+      seen.size < MAX_ASSETS &&
+      Object.keys(found).length < OPERATIONS.size
+    ) {
       const url = queue.shift()!
       if (seen.has(url)) continue
       seen.add(url)
@@ -592,7 +772,9 @@ export class XClient {
         const script = await this.text(url, false)
         findOperations(script, found)
         for (const nested of scriptUrls(script)) if (!seen.has(nested)) queue.push(nested)
-      } catch { /* Another bundle may still contain the operation. */ }
+      } catch {
+        /* Another bundle may still contain the operation. */
+      }
     }
     discoveredIds = found
     discoveredAt = Object.keys(found).length ? Date.now() : 0
@@ -604,18 +786,30 @@ export class XClient {
     const ids = await this.discover()
     const id = ids[operation]
     if (!id) {
-      throw new XApiError(`未找到 ${operation} 查询 ID。请在“高级设置”中从 X 网页 Network 请求填入该操作的 ID 后重新连接。`)
+      throw new XApiError(
+        `未找到 ${operation} 查询 ID。请在“高级设置”中从 X 网页 Network 请求填入该操作的 ID 后重新连接。`,
+        undefined,
+        null,
+        `Could not find the ${operation} query ID. Copy it from the matching X Network request into Advanced settings and reconnect.`,
+      )
     }
     return id
   }
 
-  private async withOperation<T>(operation: Operation, run: (id: string) => Promise<T>): Promise<T> {
+  private async withOperation<T>(
+    operation: Operation,
+    run: (id: string) => Promise<T>,
+  ): Promise<T> {
     const id = await this.operationId(operation)
     try {
       return await run(id)
     } catch (error) {
-      if (this.overrides[operation] || !(error instanceof XApiError) ||
-        ![400, 404].includes(error.status ?? 0)) throw error
+      if (
+        this.overrides[operation] ||
+        !(error instanceof XApiError) ||
+        ![400, 404].includes(error.status ?? 0)
+      )
+        throw error
       discoveredAt = 0
       discoveredIds = {}
       const freshId = await this.operationId(operation)
@@ -644,7 +838,12 @@ export class XClient {
         if (remaining > 0) await sleep(remaining, undefined, { signal })
       }
       try {
-        return await this.json('GET', `/i/api/graphql/${id}/${operation}?${params}`, undefined, signal)
+        return await this.json(
+          'GET',
+          `/i/api/graphql/${id}/${operation}?${params}`,
+          undefined,
+          signal,
+        )
       } finally {
         if (scanning) this.lastScanRequestFinishedAt = Date.now()
       }
@@ -661,7 +860,13 @@ export class XClient {
     })
   }
 
-  private async list(kind: 'following' | 'bookmarks', userId?: string, onPage?: (count: number, page: number, inferredEnd: boolean) => void, signal?: AbortSignal, expectedCount?: number | null): Promise<MigrationItem[]> {
+  private async list(
+    kind: 'following' | 'bookmarks',
+    userId?: string,
+    onPage?: (count: number, page: number, inferredEnd: boolean) => void,
+    signal?: AbortSignal,
+    expectedCount?: number | null,
+  ): Promise<MigrationItem[]> {
     const all: MigrationItem[] = []
     const seenIds = new Set<string>()
     const seenCursors = new Set<string>()
@@ -669,11 +874,18 @@ export class XClient {
     let stalePages = 0
     for (let page = 0; page < MAX_PAGES; page++) {
       signal?.throwIfAborted()
-      const variables: JsonObject = kind === 'following'
-        ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
-        : { count: 20, includePromotedContent: false }
+      const variables: JsonObject =
+        kind === 'following'
+          ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
+          : { count: 20, includePromotedContent: false }
       if (cursor) variables.cursor = cursor
-      const body = await this.graphqlGet(kind === 'following' ? 'Following' : 'Bookmarks', variables, graphqlFeatures, undefined, signal)
+      const body = await this.graphqlGet(
+        kind === 'following' ? 'Following' : 'Bookmarks',
+        variables,
+        graphqlFeatures,
+        undefined,
+        signal,
+      )
       signal?.throwIfAborted()
       const result = parseTimeline(body, kind)
       const previousCount = all.length
@@ -685,31 +897,58 @@ export class XClient {
       }
       stalePages = all.length === previousCount ? stalePages + 1 : 0
       const repeatedCursor = !!result.cursor && seenCursors.has(result.cursor)
-      const knownFollowingCount = kind === 'following' && expectedCount !== null && expectedCount !== undefined
-      const inferredEnd = !!result.cursor && !knownFollowingCount &&
+      const knownFollowingCount =
+        kind === 'following' && expectedCount !== null && expectedCount !== undefined
+      const inferredEnd =
+        !!result.cursor &&
+        !knownFollowingCount &&
         (stalePages >= 2 || (repeatedCursor && stalePages >= 1))
       onPage?.(all.length, page + 1, inferredEnd)
       if (!result.cursor) return all
       if (knownFollowingCount && all.length === expectedCount && stalePages >= 1) return all
       if (inferredEnd) return all
       if (stalePages >= MAX_STALE_PAGES) {
-        const expected = kind === 'following' && expectedCount !== null && expectedCount !== undefined
-          ? `，账号资料显示总关注 ${expectedCount} 项`
-          : ''
-        throw new XApiError(`X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项${expected}。`)
+        const expected =
+          kind === 'following' && expectedCount !== null && expectedCount !== undefined
+            ? `，账号资料显示总关注 ${expectedCount} 项`
+            : ''
+        throw new XApiError(
+          `X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项${expected}。`,
+          undefined,
+          null,
+          `X returned no new ${kind === 'following' ? 'follows' : 'bookmarks'} for ${MAX_STALE_PAGES} pages. Scanning stopped to avoid missing data. Page ${page + 1} returned ${result.items.length}; ${all.length} read in total${expectedCount === null || expectedCount === undefined ? '' : `; profile count: ${expectedCount}`}.`,
+        )
       }
-      if (repeatedCursor) throw new XApiError('X 返回重复分页游标，已停止扫描以避免遗漏数据。')
+      if (repeatedCursor)
+        throw new XApiError(
+          'X 返回重复分页游标，已停止扫描以避免遗漏数据。',
+          undefined,
+          null,
+          'X returned a repeated page cursor. Scanning stopped to avoid missing data.',
+        )
       seenCursors.add(result.cursor)
       cursor = result.cursor
     }
-    throw new XApiError('列表超过 500 页，已停止扫描以避免只迁移部分数据。')
+    throw new XApiError(
+      '列表超过 500 页，已停止扫描以避免只迁移部分数据。',
+      undefined,
+      null,
+      'The list exceeds 500 pages. Scanning stopped to avoid a partial transfer.',
+    )
   }
 
-  async following(account: Account, onPage?: (count: number, page: number, inferredEnd: boolean) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
+  async following(
+    account: Account,
+    onPage?: (count: number, page: number, inferredEnd: boolean) => void,
+    signal?: AbortSignal,
+  ): Promise<MigrationItem[]> {
     return await this.list('following', account.id, onPage, signal, account.followingCount)
   }
 
-  async bookmarks(onPage?: (count: number, page: number, inferredEnd: boolean) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
+  async bookmarks(
+    onPage?: (count: number, page: number, inferredEnd: boolean) => void,
+    signal?: AbortSignal,
+  ): Promise<MigrationItem[]> {
     return await this.list('bookmarks', undefined, onPage, signal)
   }
 
@@ -718,22 +957,47 @@ export class XClient {
     const response = await request(`${X_ORIGIN}${path}`, {
       method: 'POST',
       dispatcher: this.dispatcher,
-      headers: { ...await this.signedHeaders('POST', path), 'content-type': 'application/x-www-form-urlencoded' },
+      headers: {
+        ...(await this.signedHeaders('POST', path)),
+        'content-type': 'application/x-www-form-urlencoded',
+      },
       body: new URLSearchParams({ user_id: userId }).toString(),
     })
     const raw = await response.body.text()
     let body: unknown
-    try { body = JSON.parse(raw) } catch { body = {} }
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      body = {}
+    }
     if (response.statusCode === 429) {
-      throw new XApiError('X 接口已限流。请稍后继续。', 429, rateLimitReset(response.headers))
+      throw new XApiError(
+        'X 接口已限流。请稍后继续。',
+        429,
+        rateLimitReset(response.headers),
+        'X rate limited this request. Resume later.',
+      )
     }
     if (response.statusCode < 200 || response.statusCode >= 300 || safeErrorMessage(body)) {
-      throw new XApiError(`${action === 'create' ? '关注' : '取消关注'}失败（${response.statusCode}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`, response.statusCode)
+      throw new XApiError(
+        `${action === 'create' ? '关注' : '取消关注'}失败（${response.statusCode}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`,
+        response.statusCode,
+        null,
+        `${action === 'create' ? 'Follow' : 'Unfollow'} failed (${response.statusCode})${safeErrorMessage(body) ? `: ${safeErrorMessage(body)}` : ''}`,
+      )
     }
   }
 
-  async follow(userId: string): Promise<void> { await this.friendship('create', userId) }
-  async unfollow(userId: string): Promise<void> { await this.friendship('destroy', userId) }
-  async addBookmark(tweetId: string): Promise<void> { await this.graphqlPost('CreateBookmark', { tweet_id: tweetId }) }
-  async removeBookmark(tweetId: string): Promise<void> { await this.graphqlPost('DeleteBookmark', { tweet_id: tweetId }) }
+  async follow(userId: string): Promise<void> {
+    await this.friendship('create', userId)
+  }
+  async unfollow(userId: string): Promise<void> {
+    await this.friendship('destroy', userId)
+  }
+  async addBookmark(tweetId: string): Promise<void> {
+    await this.graphqlPost('CreateBookmark', { tweet_id: tweetId })
+  }
+  async removeBookmark(tweetId: string): Promise<void> {
+    await this.graphqlPost('DeleteBookmark', { tweet_id: tweetId })
+  }
 }

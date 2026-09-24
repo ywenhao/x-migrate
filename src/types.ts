@@ -1,5 +1,6 @@
 export type MigrationKind = 'following' | 'bookmarks'
-export type JobStage = 'scanning' | 'ready' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed'
+export type JobStage =
+  'scanning' | 'ready' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed'
 
 export interface AccountView {
   id: string
