@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Plugin } from 'vite'
-import type { JobProgress, JobStage, JobView, ItemsPage, MigrationKind } from '../src/types.ts'
+import type { JobProgress, JobStage, JobView, ItemsPage, MigrationKind, ScanListProgress } from '../src/types.ts'
 import { XApiError, XClient, validateQueryIds, validateSessionInput, type Account, type MigrationItem } from './x-api.ts'
 
 const SESSION_TTL = 3 * 60 * 60 * 1000
@@ -29,6 +29,7 @@ interface Job {
   source: Account
   target: Account
   selected: Record<MigrationKind, boolean>
+  scanProgress: JobView['scanProgress']
   removeSource: Record<MigrationKind, boolean>
   data: Record<MigrationKind, KindData>
   stage: JobStage
@@ -46,6 +47,10 @@ let activeJobId: string | null = null
 
 function emptyData(): KindData {
   return { source: [], targetIds: new Set(), initialTargetIds: new Set() }
+}
+
+function emptyScanList(total: number | null = null): JobView['scanProgress']['following']['source'] {
+  return { read: 0, total, page: 0, done: false }
 }
 
 function respond(response: ServerResponse, status: number, body: unknown): void {
@@ -118,6 +123,7 @@ function snapshot(job: Job): JobView {
     source: job.source,
     target: job.target,
     selected: job.selected,
+    scanProgress: job.scanProgress,
     summary: { following: summary('following'), bookmarks: summary('bookmarks') },
     progress: job.progress,
     errors: job.errors.slice(-30),
@@ -154,29 +160,54 @@ function jobError(job: Job, error: unknown): void {
 
 async function scan(job: Job, source: Session, target: Session): Promise<void> {
   const signal = job.scanAbort!.signal
+  let reading = ''
   try {
     for (const kind of ['following', 'bookmarks'] as const) {
       if (!job.selected[kind]) continue
       if (cancelCheck(job)) return
       const label = kind === 'following' ? '关注' : '收藏'
+      const report = (side: '旧' | '新', progress: ScanListProgress) =>
+        (count: number, page: number, inferredEnd: boolean) => {
+          progress.read = count
+          progress.page = page
+          job.message = `已读取${side}账号${label} ${count} 项（第 ${page} 页）…`
+          if (inferredEnd) {
+            job.errors.push(`${side}账号${label}列表连续无新增项目，已按列表末尾处理（${count} 项）。请核对数量。`)
+          }
+        }
+      reading = `旧账号${label}`
       job.message = `正在读取旧账号${label}…`
+      const sourceProgress = job.scanProgress[kind].source
       const sourceItems = kind === 'following'
-        ? await source.client.following(source.account, (count, page) => { job.message = `已读取旧账号${label} ${count} 项（第 ${page} 页）…` }, signal)
-        : await source.client.bookmarks((count, page) => { job.message = `已读取旧账号${label} ${count} 项（第 ${page} 页）…` }, signal)
+        ? await source.client.following(source.account, report('旧', sourceProgress), signal)
+        : await source.client.bookmarks(report('旧', sourceProgress), signal)
       job.data[kind].source = sourceItems
+      sourceProgress.read = sourceItems.length
+      sourceProgress.total ??= sourceItems.length
+      sourceProgress.done = true
       if (cancelCheck(job)) return
+      reading = `新账号${label}`
       job.message = `正在读取新账号${label}，用于跳过已有内容…`
+      const targetProgress = job.scanProgress[kind].target
       const targetItems = kind === 'following'
-        ? await target.client.following(target.account, (count, page) => { job.message = `已读取新账号${label} ${count} 项（第 ${page} 页）…` }, signal)
-        : await target.client.bookmarks((count, page) => { job.message = `已读取新账号${label} ${count} 项（第 ${page} 页）…` }, signal)
+        ? await target.client.following(target.account, report('新', targetProgress), signal)
+        : await target.client.bookmarks(report('新', targetProgress), signal)
       job.data[kind].targetIds = new Set(targetItems.map((item) => item.id))
       job.data[kind].initialTargetIds = new Set(job.data[kind].targetIds)
+      targetProgress.read = targetItems.length
+      targetProgress.total ??= targetItems.length
+      targetProgress.done = true
     }
     if (cancelCheck(job)) return
     job.stage = 'ready'
-    job.message = '扫描完成。请核对数量和预览，再决定是否开始迁移。'
+    job.message = job.errors.length
+      ? '扫描已结束。部分列表因连续无新增项目按末尾处理，请核对数量和预览。'
+      : '扫描完成。请核对数量和预览，再决定是否开始迁移。'
   } catch (error) {
-    if (!cancelCheck(job)) jobError(job, error)
+    if (!cancelCheck(job)) {
+      const message = error instanceof Error ? error.message : '任务失败。'
+      jobError(job, new Error(reading ? `${reading}：${message}` : message))
+    }
   } finally {
     job.scanAbort = null
     if (activeJobId === job.id) activeJobId = null
@@ -329,6 +360,13 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         source: source.account,
         target: target.account,
         selected,
+        scanProgress: {
+          following: {
+            source: emptyScanList(source.account.followingCount ?? null),
+            target: emptyScanList(target.account.followingCount ?? null),
+          },
+          bookmarks: { source: emptyScanList(), target: emptyScanList() },
+        },
         removeSource: { following: false, bookmarks: false },
         data: { following: emptyData(), bookmarks: emptyData() },
         stage: 'scanning',

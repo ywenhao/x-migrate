@@ -1,6 +1,6 @@
 <script setup vapor lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import type { AccountView, ItemView, ItemsPage, JobView, MigrationKind } from './types'
+import type { AccountView, ItemView, ItemsPage, JobView, MigrationKind, ScanListProgress } from './types'
 
 type Role = 'source' | 'target'
 interface Connection { sessionId: string; account: AccountView }
@@ -43,6 +43,10 @@ const percentage = computed(() => {
   const progress = job.value?.progress
   return progress?.total ? Math.round(progress.processed / progress.total * 100) : 0
 })
+
+function scanCount(progress: ScanListProgress): string {
+  return `${progress.read} / ${progress.total ?? '扫描后确认'}`
+}
 
 function persistSession(): void {
   const saved = {
@@ -325,6 +329,7 @@ onUnmounted(stopPolling)
                 <div><strong>{{ connections.source.account.name }}</strong><small>@{{ connections.source.account.screenName }}</small></div>
               </div>
               <div class="connected-line"><span class="check-dot">✓</span> 会话已验证</div>
+              <div class="connected-line">总关注 {{ connections.source.account.followingCount ?? '扫描后确认' }}</div>
               <button class="text-button" type="button" :disabled="taskActive" @click="disconnect('source')">断开连接</button>
             </template>
             <form v-else @submit.prevent="connect('source')">
@@ -352,6 +357,7 @@ onUnmounted(stopPolling)
                 <div><strong>{{ connections.target.account.name }}</strong><small>@{{ connections.target.account.screenName }}</small></div>
               </div>
               <div class="connected-line"><span class="check-dot">✓</span> 会话已验证</div>
+              <div class="connected-line">总关注 {{ connections.target.account.followingCount ?? '扫描后确认' }}</div>
               <button class="text-button" type="button" :disabled="taskActive" @click="disconnect('target')">断开连接</button>
             </template>
             <form v-else @submit.prevent="connect('target')">
@@ -394,10 +400,14 @@ onUnmounted(stopPolling)
       <section v-if="job" class="section result-section" aria-labelledby="result-heading">
         <div class="section-heading"><span class="section-number">03</span><div><h2 id="result-heading">预览与执行</h2><p>{{ job.message }}</p></div></div>
         <div v-if="job.stage === 'scanning'" class="status-panel"><span class="spinner" aria-hidden="true"></span><div><strong>正在扫描列表</strong><p>{{ job.message }}</p></div><button class="text-button" type="button" @click="cancel">停止</button></div>
-        <template v-else>
-          <div class="summary-grid">
-            <div v-if="job.selected.following" class="summary-card"><span>关注的人</span><strong>{{ job.summary.following.source }}</strong><small>待新增 {{ job.summary.following.toCopy }} · 已有 {{ job.summary.following.alreadyThere }}</small></div>
-            <div v-if="job.selected.bookmarks" class="summary-card"><span>收藏的推文</span><strong>{{ job.summary.bookmarks.source }}</strong><small>待新增 {{ job.summary.bookmarks.toCopy }} · 已有 {{ job.summary.bookmarks.alreadyThere }}</small></div>
+        <div v-if="job.stage === 'scanning' || ((job.stage === 'failed' || job.stage === 'cancelled') && job.progress.total === 0)" class="summary-grid scan-progress-grid">
+          <div v-if="job.selected.following" class="summary-card"><span>关注人数</span><strong>{{ scanCount(job.scanProgress.following.source) }}</strong><small>旧账号已读取 / 总关注</small><small>新账号 {{ scanCount(job.scanProgress.following.target) }}</small></div>
+          <div v-if="job.selected.bookmarks" class="summary-card"><span>收藏数量</span><strong>{{ scanCount(job.scanProgress.bookmarks.source) }}</strong><small>旧账号已读取 / 总收藏</small><small>新账号 {{ scanCount(job.scanProgress.bookmarks.target) }}</small></div>
+        </div>
+        <template v-if="job.stage !== 'scanning'">
+          <div v-if="(job.stage !== 'failed' && job.stage !== 'cancelled') || job.progress.total > 0" class="summary-grid">
+            <div v-if="job.selected.following" class="summary-card"><span>关注的人</span><strong>{{ job.summary.following.source }}</strong><small>待新增 {{ job.summary.following.toCopy }} · 已有 {{ job.summary.following.alreadyThere }}</small><small>新账号总关注 {{ job.scanProgress.following.target.total ?? job.scanProgress.following.target.read }}</small></div>
+            <div v-if="job.selected.bookmarks" class="summary-card"><span>收藏的推文</span><strong>{{ job.summary.bookmarks.source }}</strong><small>待新增 {{ job.summary.bookmarks.toCopy }} · 已有 {{ job.summary.bookmarks.alreadyThere }}</small><small>新账号总收藏 {{ job.scanProgress.bookmarks.target.total ?? job.scanProgress.bookmarks.target.read }}</small></div>
           </div>
           <div v-if="job.stage !== 'failed' || job.progress.total > 0" class="preview-block">
             <div class="preview-header"><h3>内容预览</h3><div class="tabs"><button v-if="job.selected.following" type="button" :class="{ active: previewKind === 'following' }" @click="previewKind = 'following'">关注</button><button v-if="job.selected.bookmarks" type="button" :class="{ active: previewKind === 'bookmarks' }" @click="previewKind = 'bookmarks'">收藏</button></div></div>

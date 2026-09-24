@@ -71,12 +71,14 @@ const PROFILE_FEATURE_KEYS = [
   'responsive_web_twitter_article_notes_tab_enabled',
   'subscriptions_feature_can_gift_premium',
   'creator_subscriptions_tweet_preview_api_enabled',
-  'responsive_web_graphql_skip_user_profile_image_extensions_enabled',
   'responsive_web_graphql_timeline_navigation_enabled',
 ] as const
-const profileFeatures = Object.fromEntries(PROFILE_FEATURE_KEYS
-  .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
-  .map((key) => [key, (features as Record<string, unknown>)[key]]))
+const profileFeatures = {
+  ...Object.fromEntries(PROFILE_FEATURE_KEYS
+    .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
+    .map((key) => [key, (features as Record<string, unknown>)[key]])),
+  subscriptions_feature_can_gift_premium: true,
+}
 const VIEWER_FEATURE_KEYS = [
   'subscriptions_upsells_api_enabled',
   'profile_label_improvements_pcf_label_in_post_enabled',
@@ -98,6 +100,7 @@ export interface Account {
   screenName: string
   name: string
   avatarUrl: string | null
+  followingCount: number | null
 }
 
 export interface MigrationItem {
@@ -132,6 +135,10 @@ function at(value: unknown, ...path: string[]): unknown {
 
 function string(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function nonNegativeCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
 }
 
 function entriesFromInstructions(value: unknown): JsonObject[] {
@@ -458,6 +465,8 @@ export class XClient {
         avatarUrl: string(at(user, 'avatar', 'image_url')) ||
           string(at(user, 'legacy', 'profile_image_url_https')) ||
           string(user.profile_image_url_https) || null,
+        followingCount: nonNegativeCount(at(user, 'relationship_counts', 'following')) ??
+          nonNegativeCount(at(user, 'legacy', 'friends_count')) ?? nonNegativeCount(user.friends_count),
       }
     }
 
@@ -473,7 +482,19 @@ export class XClient {
           withAuxiliaryUserLabels: (features as Record<string, unknown>).blue_business_multi_affiliates_ui_enabled === true,
         })
       const account = accountFrom(at(viewer, 'data', 'viewer', 'user_results', 'result'))
-      if (account) return account
+      if (account) {
+        try {
+          const profile = await this.graphqlGet('UserByScreenName',
+            { screen_name: account.screenName, withGrokTranslatedBio: true },
+            profileFeatures,
+            { withPayments: false, withAuxiliaryUserLabels: true })
+          const detailed = accountFrom(at(profile, 'data', 'user', 'result'), account.screenName)
+          if (detailed?.id === account.id && detailed.followingCount !== null) {
+            account.followingCount = detailed.followingCount
+          }
+        } catch { /* The Viewer identity remains valid if the optional profile request fails. */ }
+        return account
+      }
       viewerError = new XApiError('Viewer 未返回账号身份。')
     } catch (error) {
       if (!(error instanceof XApiError) || error.status === 401 || error.status === 403 ||
@@ -622,7 +643,7 @@ export class XClient {
     })
   }
 
-  private async list(kind: 'following' | 'bookmarks', userId?: string, onPage?: (count: number, page: number) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
+  private async list(kind: 'following' | 'bookmarks', userId?: string, onPage?: (count: number, page: number, inferredEnd: boolean) => void, signal?: AbortSignal, expectedCount?: number | null): Promise<MigrationItem[]> {
     const all: MigrationItem[] = []
     const seenIds = new Set<string>()
     const seenCursors = new Set<string>()
@@ -631,7 +652,7 @@ export class XClient {
     for (let page = 0; page < MAX_PAGES; page++) {
       signal?.throwIfAborted()
       const variables: JsonObject = kind === 'following'
-        ? { userId, count: 20, includePromotedContent: false, withGrokTranslatedBio: true }
+        ? { userId, count: 100, includePromotedContent: false, withGrokTranslatedBio: true }
         : { count: 20, includePromotedContent: false }
       if (cursor) variables.cursor = cursor
       const body = await this.graphqlGet(kind === 'following' ? 'Following' : 'Bookmarks', variables, graphqlFeatures, undefined, signal)
@@ -645,23 +666,32 @@ export class XClient {
         }
       }
       stalePages = all.length === previousCount ? stalePages + 1 : 0
-      onPage?.(all.length, page + 1)
+      const repeatedCursor = !!result.cursor && seenCursors.has(result.cursor)
+      const knownFollowingCount = kind === 'following' && expectedCount !== null && expectedCount !== undefined
+      const inferredEnd = !!result.cursor && !knownFollowingCount &&
+        (stalePages >= 2 || (repeatedCursor && stalePages >= 1))
+      onPage?.(all.length, page + 1, inferredEnd)
       if (!result.cursor) return all
+      if (knownFollowingCount && all.length === expectedCount && stalePages >= 1) return all
+      if (inferredEnd) return all
       if (stalePages >= MAX_STALE_PAGES) {
-        throw new XApiError(`X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项。`)
+        const expected = kind === 'following' && expectedCount !== null && expectedCount !== undefined
+          ? `，账号资料显示总关注 ${expectedCount} 项`
+          : ''
+        throw new XApiError(`X 连续 ${MAX_STALE_PAGES} 页未返回新的${kind === 'following' ? '关注' : '收藏'}项目，已停止扫描以避免漏读。第 ${page + 1} 页返回 ${result.items.length} 项，累计 ${all.length} 项${expected}。`)
       }
-      if (seenCursors.has(result.cursor)) throw new XApiError('X 返回重复分页游标，已停止扫描以避免遗漏数据。')
+      if (repeatedCursor) throw new XApiError('X 返回重复分页游标，已停止扫描以避免遗漏数据。')
       seenCursors.add(result.cursor)
       cursor = result.cursor
     }
     throw new XApiError('列表超过 500 页，已停止扫描以避免只迁移部分数据。')
   }
 
-  async following(account: Account, onPage?: (count: number, page: number) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
-    return await this.list('following', account.id, onPage, signal)
+  async following(account: Account, onPage?: (count: number, page: number, inferredEnd: boolean) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
+    return await this.list('following', account.id, onPage, signal, account.followingCount)
   }
 
-  async bookmarks(onPage?: (count: number, page: number) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
+  async bookmarks(onPage?: (count: number, page: number, inferredEnd: boolean) => void, signal?: AbortSignal): Promise<MigrationItem[]> {
     return await this.list('bookmarks', undefined, onPage, signal)
   }
 

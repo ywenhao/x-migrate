@@ -6,6 +6,19 @@ export interface AccountView {
   screenName: string
   name: string
   avatarUrl: string | null
+  followingCount: number | null
+}
+
+export interface ScanListProgress {
+  read: number
+  total: number | null
+  page: number
+  done: boolean
+}
+
+export interface ScanKindProgress {
+  source: ScanListProgress
+  target: ScanListProgress
 }
 
 export interface ItemView {
@@ -39,6 +52,7 @@ export interface JobView {
   source: AccountView
   target: AccountView
   selected: Record<MigrationKind, boolean>
+  scanProgress: Record<MigrationKind, ScanKindProgress>
   summary: Record<MigrationKind, KindSummary>
   progress: JobProgress
   errors: string[]
