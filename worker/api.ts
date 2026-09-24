@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { XApiError, XClient, validateQueryIds, validateSessionInput, type Operation } from './x-api.ts'
+import { XApiError, XClient, validateQueryIds, validateSessionInput } from './x-api.ts'
 
 export type WorkerBindings = { ASSETS: { fetch(request: Request): Promise<Response> } }
 
