@@ -40,6 +40,7 @@ const {
   connect,
   disconnect,
   scan,
+  refreshKind,
   availableItems,
   allChosen,
   toggleAll,
@@ -230,6 +231,35 @@ const {
             <h2 id="result-heading">{{ t('resultHeading') }}</h2>
             <p>{{ job.message }}</p>
           </div>
+        </div>
+        <div v-if="job.stage === 'ready' || job.stage === 'completed'" class="refresh-actions">
+          <button
+            class="button button-dark"
+            type="button"
+            :disabled="taskActive || !bothConnected || sameAccount"
+            @click="refreshKind('following')"
+          >
+            <span aria-hidden="true">↻</span>
+            {{ loadingItems.following ? t('refreshingFollows') : t('refreshFollows') }}
+          </button>
+          <button
+            class="button button-dark"
+            type="button"
+            :disabled="taskActive || !bothConnected || sameAccount"
+            @click="refreshKind('bookmarks')"
+          >
+            <span aria-hidden="true">↻</span>
+            {{ loadingItems.bookmarks ? t('refreshingBookmarks') : t('refreshBookmarks') }}
+          </button>
+          <button
+            v-if="loadingItems.following || loadingItems.bookmarks"
+            class="text-button"
+            type="button"
+            @click="cancel"
+          >
+            {{ t('stop') }}
+          </button>
+          <p class="muted-note">{{ t('refreshHelp') }}</p>
         </div>
         <div v-if="job.stage === 'scanning'" class="status-panel">
           <span class="spinner" aria-hidden="true"></span>

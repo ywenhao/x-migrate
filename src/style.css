@@ -577,6 +577,20 @@ textarea::placeholder {
   gap: 13px;
   margin-top: 24px;
 }
+.refresh-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.refresh-actions .text-button {
+  align-self: center;
+}
+.refresh-actions .muted-note {
+  flex-basis: 100%;
+  margin: 0;
+}
 .muted-note {
   color: #68635d;
   font-size: 11px;

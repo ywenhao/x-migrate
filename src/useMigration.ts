@@ -52,12 +52,14 @@ export function useMigration() {
     bookmarks: new Set(),
   })
   const loadingItems = reactive({ following: false, bookmarks: false })
+  const refreshingKind = ref<MigrationKind | null>(null)
   const busy = ref(false)
   const error = ref('')
   const clockNow = ref(Date.now())
   let clockTimer: ReturnType<typeof setInterval> | null = null
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let scanAbort: AbortController | null = null
+  let refreshAbort: AbortController | null = null
   let cancelled = false
   let plan: TransferPlan | null = null
 
@@ -68,12 +70,16 @@ export function useMigration() {
       !!connections.target &&
       connections.source.account.id === connections.target.account.id,
   )
-  const taskActive = computed(() =>
-    ['scanning', 'running', 'paused'].includes(job.value?.stage || ''),
+  const taskActive = computed(
+    () =>
+      ['scanning', 'running', 'paused'].includes(job.value?.stage || '') ||
+      refreshingKind.value !== null,
   )
   const chosenCount = computed(() => chosenIds.following.size + chosenIds.bookmarks.size)
   const canChooseItems = computed(
-    () => job.value?.stage === 'ready' || job.value?.stage === 'completed',
+    () =>
+      refreshingKind.value === null &&
+      (job.value?.stage === 'ready' || job.value?.stage === 'completed'),
   )
   const remainingCount = computed(
     () => availableItems('following').length + availableItems('bookmarks').length,
@@ -363,9 +369,10 @@ export function useMigration() {
     role: Role,
     kind: MigrationKind,
     signal: AbortSignal,
+    progress = job.value!.scanProgress[kind][role],
   ): Promise<ItemView[]> {
     let previousRequestFinishedAt = 0
-    const progress = job.value!.scanProgress[kind][role]
+    const saveProgress = progress === job.value!.scanProgress[kind][role]
     const accountId = kind === 'following' ? connections[role]!.account.id : undefined
     const expectedCount = kind === 'following' ? connections[role]!.account.followingCount : null
     const items = await readCompleteList<ItemView>(
@@ -390,13 +397,13 @@ export function useMigration() {
         progress.read = count
         progress.page = page
         progress.inferredEnd = inferredEnd
-        persist()
+        if (saveProgress) persist()
       },
       signal,
     )
     progress.done = true
     progress.total = items.length
-    persist()
+    if (saveProgress) persist()
     return items
   }
 
@@ -471,6 +478,98 @@ export function useMigration() {
     } finally {
       busy.value = false
       scanAbort = null
+    }
+  }
+
+  async function refreshKind(kind: MigrationKind): Promise<void> {
+    if (
+      !job.value ||
+      !canChooseItems.value ||
+      !bothConnected.value ||
+      sameAccount.value ||
+      busy.value
+    )
+      return
+    error.value = ''
+    busy.value = true
+    refreshingKind.value = kind
+    loadingItems[kind] = true
+    const controller = new AbortController()
+    refreshAbort = controller
+    const previous = {
+      items: previewItems[kind],
+      progress: job.value.scanProgress[kind],
+      summary: job.value.summary[kind],
+      chosen: new Set(chosenIds[kind]),
+      selected: selected[kind],
+      jobSelected: job.value.selected[kind],
+      previewKind: previewKind.value,
+      message: job.value.message,
+    }
+    let changed = false
+    try {
+      const progress = {
+        source: makeProgress(
+          kind === 'following' ? connections.source!.account.followingCount : null,
+        ),
+        target: makeProgress(
+          kind === 'following' ? connections.target!.account.followingCount : null,
+        ),
+      }
+      const scans = [
+        scanList('source', kind, controller.signal, progress.source),
+        scanList('target', kind, controller.signal, progress.target),
+      ] as const
+      let pages: [ItemView[], ItemView[]]
+      try {
+        pages = await Promise.all(scans)
+      } catch (cause) {
+        controller.abort()
+        await Promise.allSettled(scans)
+        throw cause
+      }
+      controller.signal.throwIfAborted()
+      const [source, target] = pages
+      const targetIds = new Set(target.map((item) => item.id))
+      source.forEach((item) => {
+        item.alreadyThere = targetIds.has(item.id)
+      })
+      changed = true
+      previewItems[kind] = source
+      job.value.scanProgress[kind] = progress
+      job.value.selected[kind] = true
+      selected[kind] = true
+      const availableIds = new Set(
+        source.filter((item) => !item.alreadyThere).map((item) => item.id),
+      )
+      chosenIds[kind] = new Set([...previous.chosen].filter((id) => availableIds.has(id)))
+      updateSummary(kind)
+      previewKind.value = kind
+      const label = t(kind === 'following' ? 'follows' : 'bookmarks')
+      job.value.message = t(
+        progress.source.inferredEnd || progress.target.inferredEnd
+          ? 'refreshCompleteUncertain'
+          : 'refreshComplete',
+        { kind: label },
+      )
+      persist()
+    } catch (cause) {
+      if (changed && job.value) {
+        previewItems[kind] = previous.items
+        job.value.scanProgress[kind] = previous.progress
+        job.value.summary[kind] = previous.summary
+        job.value.selected[kind] = previous.jobSelected
+        selected[kind] = previous.selected
+        chosenIds[kind] = previous.chosen
+        previewKind.value = previous.previewKind
+        job.value.message = previous.message
+      }
+      if (controller.signal.reason !== 'refresh-stopped') showError(cause)
+    } finally {
+      loadingItems[kind] = false
+      refreshingKind.value = null
+      refreshAbort = null
+      busy.value = false
     }
   }
 
@@ -657,6 +756,10 @@ export function useMigration() {
 
   async function cancel(): Promise<void> {
     if (!job.value || !taskActive.value) return
+    if (refreshingKind.value) {
+      refreshAbort?.abort('refresh-stopped')
+      return
+    }
     cancelled = true
     clearRetryTimer()
     if (job.value.stage === 'scanning') {
@@ -706,6 +809,7 @@ export function useMigration() {
   onUnmounted(() => {
     if (clockTimer) clearInterval(clockTimer)
     clearRetryTimer()
+    refreshAbort?.abort('refresh-stopped')
   })
 
   return {
@@ -746,6 +850,7 @@ export function useMigration() {
     connect,
     disconnect,
     scan,
+    refreshKind,
     availableItems,
     allChosen,
     toggleAll,
