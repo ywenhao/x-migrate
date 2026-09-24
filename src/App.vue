@@ -21,6 +21,7 @@ const {
   previewItems,
   chosenIds,
   loadingItems,
+  refreshProgress,
   busy,
   error,
   bothConnected,
@@ -298,39 +299,55 @@ const {
             v-if="(job.stage !== 'failed' && job.stage !== 'cancelled') || job.progress.total > 0"
             class="summary-grid"
           >
-            <div v-if="job.selected.following" class="summary-card">
+            <div v-if="job.selected.following || refreshProgress.following" class="summary-card">
               <span>{{ t('follows') }}</span
-              ><strong>{{ job.summary.following.source }}</strong
-              ><small>{{
-                t('newAndExisting', {
-                  newCount: job.summary.following.toCopy,
-                  existingCount: job.summary.following.alreadyThere,
-                })
-              }}</small
-              ><small>{{
-                t('targetTotalFollows', {
-                  count:
-                    job.scanProgress.following.target.total ??
-                    job.scanProgress.following.target.read,
-                })
-              }}</small>
+              ><template v-if="refreshProgress.following"
+                ><strong>{{ scanCount(refreshProgress.following.source) }}</strong
+                ><small>{{ t('sourceRead') }}</small
+                ><small>{{
+                  t('targetRead', { count: scanCount(refreshProgress.following.target) })
+                }}</small></template
+              ><template v-else
+                ><strong>{{ job.summary.following.source }}</strong
+                ><small>{{
+                  t('newAndExisting', {
+                    newCount: job.summary.following.toCopy,
+                    existingCount: job.summary.following.alreadyThere,
+                  })
+                }}</small
+                ><small>{{
+                  t('targetTotalFollows', {
+                    count:
+                      job.scanProgress.following.target.total ??
+                      job.scanProgress.following.target.read,
+                  })
+                }}</small></template
+              >
             </div>
-            <div v-if="job.selected.bookmarks" class="summary-card">
+            <div v-if="job.selected.bookmarks || refreshProgress.bookmarks" class="summary-card">
               <span>{{ t('bookmarks') }}</span
-              ><strong>{{ job.summary.bookmarks.source }}</strong
-              ><small>{{
-                t('newAndExisting', {
-                  newCount: job.summary.bookmarks.toCopy,
-                  existingCount: job.summary.bookmarks.alreadyThere,
-                })
-              }}</small
-              ><small>{{
-                t('targetTotalBookmarks', {
-                  count:
-                    job.scanProgress.bookmarks.target.total ??
-                    job.scanProgress.bookmarks.target.read,
-                })
-              }}</small>
+              ><template v-if="refreshProgress.bookmarks"
+                ><strong>{{ scanCount(refreshProgress.bookmarks.source) }}</strong
+                ><small>{{ t('sourceRead') }}</small
+                ><small>{{
+                  t('targetRead', { count: scanCount(refreshProgress.bookmarks.target) })
+                }}</small></template
+              ><template v-else
+                ><strong>{{ job.summary.bookmarks.source }}</strong
+                ><small>{{
+                  t('newAndExisting', {
+                    newCount: job.summary.bookmarks.toCopy,
+                    existingCount: job.summary.bookmarks.alreadyThere,
+                  })
+                }}</small
+                ><small>{{
+                  t('targetTotalBookmarks', {
+                    count:
+                      job.scanProgress.bookmarks.target.total ??
+                      job.scanProgress.bookmarks.target.read,
+                  })
+                }}</small></template
+              >
             </div>
           </div>
           <div v-if="job.stage !== 'failed' || job.progress.total > 0" class="preview-block">

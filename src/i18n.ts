@@ -88,7 +88,7 @@ export const messages = {
     refreshingFollows: 'Refreshing follows…',
     refreshingBookmarks: 'Refreshing bookmarks…',
     refreshHelp:
-      'Each button rereads that list on both accounts. Other selections stay; items now on the target are unselected.',
+      'Each button rereads that list on both accounts. Other selections stay; items now on the target are unselected. X does not provide a bookmark total while reading, so progress shows ? until complete.',
     refreshComplete: '{kind} refreshed. Review the updated preview.',
     refreshCompleteUncertain:
       '{kind} refreshed, but X gave no explicit end marker. Verify the counts and preview.',
@@ -229,7 +229,7 @@ export const messages = {
     refreshingFollows: '正在刷新关注…',
     refreshingBookmarks: '正在刷新收藏…',
     refreshHelp:
-      '每个按钮只重新读取两个账号的对应列表；另一类勾选保留，目标账号已有的项目会自动取消勾选。',
+      '每个按钮只重新读取两个账号的对应列表；另一类勾选保留，目标账号已有的项目会自动取消勾选。X 读取收藏时不提供总数，完成前进度显示 ?。',
     refreshComplete: '{kind}已刷新，请核对更新后的预览。',
     refreshCompleteUncertain: '{kind}已刷新，但 X 未给出明确的结束标记，请核对数量和预览。',
     connectFirst: '连接两个账号后即可扫描',

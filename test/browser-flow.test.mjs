@@ -455,6 +455,15 @@ test('stopping a list refresh keeps the previous preview and selections', async 
     avatarUrl: null,
   }
   let holdRequests = false
+  let releaseSourceRequest = () => {}
+  const sourceReleased = new Promise((resolve) => {
+    releaseSourceRequest = resolve
+  })
+  let holdBookmarkTarget = false
+  let releaseBookmarkTarget = () => {}
+  const bookmarkTargetReleased = new Promise((resolve) => {
+    releaseBookmarkTarget = resolve
+  })
   let pendingRequests = 0
   let requestsStarted = () => {}
   const started = new Promise((resolve) => {
@@ -468,10 +477,16 @@ test('stopping a list refresh keeps the previous preview and selections', async 
     if (holdRequests) {
       pendingRequests++
       if (pendingRequests === 2) requestsStarted()
+      if (body.authToken === 'source-token') {
+        await sourceReleased
+        return Response.json({ items: [first, second], cursor: null })
+      }
       return new Promise((_, reject) => {
         init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true })
       })
     }
+    if (holdBookmarkTarget && body.kind === 'bookmarks' && body.authToken === 'target-token')
+      await bookmarkTargetReleased
     return Response.json({
       items:
         body.kind === 'bookmarks'
@@ -504,18 +519,35 @@ test('stopping a list refresh keeps the previous preview and selections', async 
     assert.equal(state.taskActive.value, true)
     assert.equal(state.canChooseItems.value, false)
     assert.equal(state.loadingItems.following, true)
+    assert.equal(state.scanCount(state.refreshProgress.following.source), '0 / 2')
+    assert.equal(state.scanCount(state.refreshProgress.following.target), '0 / 1')
+    releaseSourceRequest()
+    const deadline = Date.now() + 1000
+    while (state.refreshProgress.following.source.read !== 2 && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(state.scanCount(state.refreshProgress.following.source), '2 / 2')
+    assert.equal(state.scanCount(state.refreshProgress.following.target), '0 / 1')
     await state.cancel()
     await refreshing
     assert.equal(state.job.value.stage, 'ready')
     assert.equal(state.error.value, '')
     assert.equal(state.loadingItems.following, false)
+    assert.equal(state.refreshProgress.following, null)
     assert.equal(state.chosenIds.following.has('301'), true)
     assert.deepEqual(
       state.previewItems.following.map((item) => item.id),
       ['301', '302'],
     )
     holdRequests = false
-    await state.refreshKind('bookmarks')
+    holdBookmarkTarget = true
+    const bookmarkRefresh = state.refreshKind('bookmarks')
+    const bookmarkDeadline = Date.now() + 1000
+    while (state.refreshProgress.bookmarks?.source.read !== 1 && Date.now() < bookmarkDeadline)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    assert.equal(state.scanCount(state.refreshProgress.bookmarks.source), '1 / 1')
+    assert.equal(state.scanCount(state.refreshProgress.bookmarks.target), '0 / ?')
+    releaseBookmarkTarget()
+    await bookmarkRefresh
     assert.equal(state.selected.bookmarks, true)
     assert.equal(state.job.value.selected.bookmarks, true)
     assert.equal(state.previewComplete.value, true)
@@ -525,6 +557,8 @@ test('stopping a list refresh keeps the previous preview and selections', async 
     )
     assert.equal(state.chosenIds.following.has('301'), true)
   } finally {
+    releaseSourceRequest()
+    releaseBookmarkTarget()
     app?.unmount()
     globalThis.fetch = originalFetch
   }

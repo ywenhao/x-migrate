@@ -4,7 +4,14 @@ import { readCompleteList, type ListPage } from '../shared/pagination.ts'
 import { cookiesFromCurl } from './curl.ts'
 import { saveLocale, type Locale } from './i18n.ts'
 import { executeTransfer, type TransferEntry, type TransferPlan } from './transfer.ts'
-import type { AccountView, ItemView, JobView, MigrationKind, ScanListProgress } from './types.ts'
+import type {
+  AccountView,
+  ItemView,
+  JobView,
+  MigrationKind,
+  ScanKindProgress,
+  ScanListProgress,
+} from './types.ts'
 
 type Role = 'source' | 'target'
 type Credentials = { authToken: string; ct0: string }
@@ -52,6 +59,10 @@ export function useMigration() {
     bookmarks: new Set(),
   })
   const loadingItems = reactive({ following: false, bookmarks: false })
+  const refreshProgress = reactive<Record<MigrationKind, ScanKindProgress | null>>({
+    following: null,
+    bookmarks: null,
+  })
   const refreshingKind = ref<MigrationKind | null>(null)
   const busy = ref(false)
   const error = ref('')
@@ -317,7 +328,7 @@ export function useMigration() {
   }
 
   function scanCount(progress: ScanListProgress): string {
-    return progress.read + ' / ' + (progress.total ?? t('afterScan'))
+    return progress.read + ' / ' + (progress.total ?? '?')
   }
   function makeProgress(total: number | null = null): ScanListProgress {
     return { read: 0, total, page: 0, done: false }
@@ -508,14 +519,15 @@ export function useMigration() {
     }
     let changed = false
     try {
-      const progress = {
+      const progress: ScanKindProgress = reactive({
         source: makeProgress(
           kind === 'following' ? connections.source!.account.followingCount : null,
         ),
         target: makeProgress(
           kind === 'following' ? connections.target!.account.followingCount : null,
         ),
-      }
+      })
+      refreshProgress[kind] = progress
       const scans = [
         scanList('source', kind, controller.signal, progress.source),
         scanList('target', kind, controller.signal, progress.target),
@@ -567,6 +579,7 @@ export function useMigration() {
       if (controller.signal.reason !== 'refresh-stopped') showError(cause)
     } finally {
       loadingItems[kind] = false
+      refreshProgress[kind] = null
       refreshingKind.value = null
       refreshAbort = null
       busy.value = false
@@ -831,6 +844,7 @@ export function useMigration() {
     previewItems,
     chosenIds,
     loadingItems,
+    refreshProgress,
     busy,
     error,
     bothConnected,
