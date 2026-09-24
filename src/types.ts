@@ -1,5 +1,5 @@
 export type MigrationKind = 'following' | 'bookmarks'
-export type JobStage = 'scanning' | 'ready' | 'running' | 'completed' | 'cancelled' | 'failed'
+export type JobStage = 'scanning' | 'ready' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed'
 
 export interface AccountView {
   id: string
@@ -55,6 +55,7 @@ export interface JobView {
   scanProgress: Record<MigrationKind, ScanKindProgress>
   summary: Record<MigrationKind, KindSummary>
   progress: JobProgress
+  retryAt: number | null
   errors: string[]
   removeSource: Record<MigrationKind, boolean>
 }

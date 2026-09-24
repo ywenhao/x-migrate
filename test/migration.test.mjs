@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { createServer } from 'vite'
 import { xApiPlugin } from '../server/plugin.ts'
-import { XClient, parseTimeline } from '../server/x-api.ts'
+import { XApiError, XClient, parseTimeline } from '../server/x-api.ts'
 
 const user = (id, handle) => ({ id, label: handle, detail: `@${handle}`, url: `https://x.com/${handle}`, avatarUrl: null })
 const tweet = (id) => ({ id, label: `推文 ${id}`, detail: '@author', url: `https://x.com/i/web/status/${id}`, avatarUrl: null })
@@ -219,6 +219,8 @@ test('预览去重、移除确认及先迁入后移除', async () => {
   assert.equal(ready.scanProgress.bookmarks.target.total, 1)
 
   const rejected = await post(`/jobs/${jobId}/start`, {
+    followingIds: ['301'],
+    bookmarkIds: ['401'],
     removeFollowing: true,
     removeBookmarks: true,
     removeConfirmation: '@wrong_account',
@@ -226,21 +228,35 @@ test('预览去重、移除确认及先迁入后移除', async () => {
   assert.equal(rejected.status, 400)
   assert.match(rejected.data.error, /old_account/)
 
+  const nothingSelected = await post(`/jobs/${jobId}/start`, { followingIds: [], bookmarkIds: [] })
+  assert.equal(nothingSelected.status, 400)
+  assert.match(nothingSelected.data.error, /至少勾选一项/)
+
+  const existingRejected = await post(`/jobs/${jobId}/start`, {
+    followingIds: ['302'],
+    bookmarkIds: [],
+  })
+  assert.equal(existingRejected.status, 400)
+  assert.match(existingRejected.data.error, /已经拥有/)
+
   const started = await post(`/jobs/${jobId}/start`, {
+    followingIds: ['301'],
+    bookmarkIds: ['401'],
     removeFollowing: true,
     removeBookmarks: true,
     removeConfirmation: '@old_account',
   })
   assert.equal(started.status, 202)
   const completed = await waitFor(jobId, 'completed')
+  assert.equal(completed.progress.total, 2)
   assert.equal(completed.progress.copied, 2)
-  assert.equal(completed.progress.alreadyThere, 2)
-  assert.equal(completed.progress.removed, 4)
+  assert.equal(completed.progress.alreadyThere, 0)
+  assert.equal(completed.progress.removed, 2)
   assert.equal(completed.progress.failed, 0)
   assert.ok(actions.indexOf('target:follow:301') < actions.indexOf('source:unfollow:301'))
   assert.ok(actions.indexOf('target:bookmark:401') < actions.indexOf('source:unbookmark:401'))
-  assert.ok(actions.includes('source:unfollow:302'))
-  assert.ok(actions.includes('source:unbookmark:402'))
+  assert.ok(!actions.includes('source:unfollow:302'))
+  assert.ok(!actions.includes('source:unbookmark:402'))
 
   const repeated = await post(`/jobs/${jobId}/start`, {})
   assert.equal(repeated.status, 409)
@@ -260,6 +276,8 @@ test('目标账号新增失败时不移除对应旧账号关注', async () => {
   const jobId = scan.data.job.id
   await waitFor(jobId, 'ready')
   const started = await post(`/jobs/${jobId}/start`, {
+    followingIds: ['301'],
+    bookmarkIds: [],
     removeFollowing: true,
     removeConfirmation: '@old_account',
   })
@@ -268,7 +286,114 @@ test('目标账号新增失败时不移除对应旧账号关注', async () => {
   assert.equal(completed.progress.failed, 1)
   assert.ok(actions.includes('target:follow:301'))
   assert.ok(!actions.includes('source:unfollow:301'))
-  assert.ok(actions.includes('source:unfollow:302'))
+  assert.ok(!actions.includes('source:unfollow:302'))
+})
+
+test('429 暂停后可手动继续同一项目', async () => {
+  const originalFollow = targetClient.follow
+  let calls = 0
+  targetClient.follow = async () => {
+    calls++
+    if (calls === 1) throw new XApiError('X 接口已限流。', 429)
+  }
+  try {
+    const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
+    const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
+    const scan = await post('/scan', {
+      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
+      following: true, bookmarks: false,
+    })
+    const jobId = scan.data.job.id
+    await waitFor(jobId, 'ready')
+    await post(`/jobs/${jobId}/start`, { followingIds: ['301'], bookmarkIds: [] })
+    const paused = await waitFor(jobId, 'paused')
+    assert.ok(paused.retryAt > Date.now() + 14 * 60 * 1000)
+    assert.equal(paused.progress.processed, 0)
+    assert.equal(paused.progress.failed, 0)
+    const resumed = await post(`/jobs/${jobId}/resume`, {})
+    assert.equal(resumed.status, 200)
+    const completed = await waitFor(jobId, 'completed')
+    assert.equal(completed.progress.copied, 1)
+    assert.equal(completed.progress.processed, 1)
+    assert.equal(calls, 2)
+  } finally {
+    targetClient.follow = originalFollow
+  }
+})
+
+test('429 按恢复时间自动继续，也可在暂停时停止', async () => {
+  const originalFollow = targetClient.follow
+  let calls = 0
+  targetClient.follow = async () => {
+    calls++
+    if (calls === 1) throw new XApiError('X 接口已限流。', 429, Date.now() + 5_000)
+  }
+  try {
+    const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
+    const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
+    const scan = await post('/scan', {
+      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
+      following: true, bookmarks: false,
+    })
+    const jobId = scan.data.job.id
+    await waitFor(jobId, 'ready')
+    await post(`/jobs/${jobId}/start`, { followingIds: ['301'], bookmarkIds: [] })
+    await waitFor(jobId, 'paused')
+    const completed = await waitFor(jobId, 'completed')
+    assert.equal(completed.progress.copied, 1)
+    assert.equal(calls, 2)
+
+    targetClient.follow = async () => { calls++; throw new XApiError('X 接口已限流。', 429) }
+    const next = await post('/scan', {
+      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
+      following: true, bookmarks: false,
+    })
+    const nextJobId = next.data.job.id
+    await waitFor(nextJobId, 'ready')
+    await post(`/jobs/${nextJobId}/start`, { followingIds: ['301'], bookmarkIds: [] })
+    await waitFor(nextJobId, 'paused')
+    const stopped = await post(`/jobs/${nextJobId}/cancel`, {})
+    assert.equal(stopped.data.job.stage, 'cancelled')
+  } finally {
+    targetClient.follow = originalFollow
+  }
+})
+
+test('旧账号清理限流后继续，不重复新增目标内容', async () => {
+  const originalFollow = targetClient.follow
+  const originalUnfollow = sourceClient.unfollow
+  let follows = 0
+  let unfollows = 0
+  targetClient.follow = async () => { follows++ }
+  sourceClient.unfollow = async () => {
+    unfollows++
+    if (unfollows === 1) throw new XApiError('X 接口已限流。', 429)
+  }
+  try {
+    const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
+    const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
+    const scan = await post('/scan', {
+      sourceSessionId: source.data.sessionId, targetSessionId: target.data.sessionId,
+      following: true, bookmarks: false,
+    })
+    const jobId = scan.data.job.id
+    await waitFor(jobId, 'ready')
+    await post(`/jobs/${jobId}/start`, {
+      followingIds: ['301'], bookmarkIds: [],
+      removeFollowing: true, removeConfirmation: '@old_account',
+    })
+    await waitFor(jobId, 'paused')
+    await post(`/jobs/${jobId}/resume`, {})
+    const completed = await waitFor(jobId, 'completed')
+    assert.equal(completed.progress.copied, 1)
+    assert.equal(completed.progress.removed, 1)
+    assert.equal(completed.progress.processed, 1)
+    assert.equal(follows, 1)
+    assert.equal(unfollows, 2)
+  } finally {
+    targetClient.follow = originalFollow
+    sourceClient.unfollow = originalUnfollow
+  }
 })
 
 test('刷新可读取会话，停止扫描会立即中断当前读取', async () => {

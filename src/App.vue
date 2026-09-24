@@ -23,16 +23,21 @@ const removeConfirmation = ref('')
 const job = ref<JobView | null>(null)
 const previewKind = ref<MigrationKind>('following')
 const previewItems = reactive<Record<MigrationKind, ItemView[]>>({ following: [], bookmarks: [] })
+const chosenIds = reactive<Record<MigrationKind, Set<string>>>({ following: new Set(), bookmarks: new Set() })
 const loadingItems = reactive({ following: false, bookmarks: false })
 const busy = ref(false)
 const error = ref('')
+const clockNow = ref(Date.now())
 let timer: ReturnType<typeof setInterval> | null = null
 let polling = false
 
 const bothConnected = computed(() => !!connections.source && !!connections.target)
 const sameAccount = computed(() => !!connections.source && !!connections.target &&
   connections.source.account.id === connections.target.account.id)
-const taskActive = computed(() => job.value?.stage === 'scanning' || job.value?.stage === 'running')
+const taskActive = computed(() => job.value?.stage === 'scanning' || job.value?.stage === 'running' || job.value?.stage === 'paused')
+const chosenCount = computed(() => chosenIds.following.size + chosenIds.bookmarks.size)
+const previewComplete = computed(() => !job.value || (['following', 'bookmarks'] as const)
+  .every((kind) => !job.value?.selected[kind] || previewItems[kind].length === job.value.summary[kind].source))
 const wantsRemoval = computed(() => removeSource.following || removeSource.bookmarks)
 const removalConfirmed = computed(() => !wantsRemoval.value ||
   removeConfirmation.value === `@${job.value?.source.screenName ?? ''}`)
@@ -42,6 +47,10 @@ const selectionMatchesJob = computed(() => !!job.value &&
 const percentage = computed(() => {
   const progress = job.value?.progress
   return progress?.total ? Math.round(progress.processed / progress.total * 100) : 0
+})
+const retryCountdown = computed(() => {
+  const remaining = Math.max(0, Math.ceil(((job.value?.retryAt ?? 0) - clockNow.value) / 1000))
+  return `${Math.floor(remaining / 60)} 分 ${remaining % 60} 秒`
 })
 
 function scanCount(progress: ScanListProgress): string {
@@ -102,11 +111,11 @@ async function restoreSession(): Promise<void> {
         removeSource.following = data.job.removeSource.following
         removeSource.bookmarks = data.job.removeSource.bookmarks
         previewKind.value = data.job.selected.following ? 'following' : 'bookmarks'
-        if (data.job.stage === 'scanning' || data.job.stage === 'running') startPolling()
+        if (data.job.stage === 'scanning' || data.job.stage === 'running' || data.job.stage === 'paused') startPolling()
         if (data.job.stage !== 'scanning') {
           await Promise.all((['following', 'bookmarks'] as const)
             .filter((kind) => data.job.selected[kind])
-            .map((kind) => loadItems(kind, true)))
+            .map((kind) => loadItems(kind)))
         }
       }
     } catch { /* An expired job can be scanned again. */ }
@@ -174,6 +183,8 @@ async function connect(role: Role): Promise<void> {
     credentials[role].ct0 = ''
     curlMessage[role] = ''
     job.value = null
+    chosenIds.following.clear()
+    chosenIds.bookmarks.clear()
     persistSession()
   } catch (cause) { showError(cause) }
   finally { connecting.value = null }
@@ -187,6 +198,8 @@ async function disconnect(role: Role): Promise<void> {
     await api('/disconnect', { sessionId: connection.sessionId })
     connections[role] = null
     job.value = null
+    chosenIds.following.clear()
+    chosenIds.bookmarks.clear()
     stopPolling()
     persistSession()
   } catch (cause) { showError(cause) }
@@ -199,6 +212,7 @@ function stopPolling(): void {
 
 async function poll(): Promise<void> {
   if (!job.value || polling) return
+  clockNow.value = Date.now()
   polling = true
   try {
     const previous = job.value.stage
@@ -209,7 +223,7 @@ async function poll(): Promise<void> {
       stopPolling()
       await Promise.all((['following', 'bookmarks'] as const)
         .filter((kind) => data.job.selected[kind])
-        .map((kind) => loadItems(kind, true)))
+        .map((kind) => loadItems(kind)))
     } else if (['completed', 'cancelled', 'failed'].includes(data.job.stage)) {
       stopPolling()
     }
@@ -235,6 +249,8 @@ async function scan(): Promise<void> {
     removeConfirmation.value = ''
     previewItems.following = []
     previewItems.bookmarks = []
+    chosenIds.following.clear()
+    chosenIds.bookmarks.clear()
     const data = await api<{ job: JobView }>('/scan', {
       sourceSessionId: connections.source.sessionId,
       targetSessionId: connections.target.sessionId,
@@ -249,19 +265,51 @@ async function scan(): Promise<void> {
   finally { busy.value = false }
 }
 
-async function loadItems(kind: MigrationKind, reset = false): Promise<void> {
+async function loadItems(kind: MigrationKind): Promise<void> {
   if (!job.value || loadingItems[kind]) return
+  const jobId = job.value.id
   loadingItems[kind] = true
   try {
-    const offset = reset ? 0 : previewItems[kind].length
-    const data = await api<ItemsPage>(`/jobs/${job.value.id}/items?kind=${kind}&offset=${offset}`)
-    previewItems[kind] = reset ? data.items : [...previewItems[kind], ...data.items]
+    const items: ItemView[] = []
+    let total = 0
+    do {
+      const data = await api<ItemsPage>(`/jobs/${jobId}/items?kind=${kind}&offset=${items.length}`)
+      total = data.total
+      if (!data.items.length && items.length < total) throw new Error('预览列表加载未完成，请重新扫描。')
+      items.push(...data.items)
+    } while (items.length < total && job.value?.id === jobId)
+    if (job.value?.id === jobId) previewItems[kind] = items
   } catch (cause) { showError(cause) }
   finally { loadingItems[kind] = false }
 }
 
+function availableItems(kind: MigrationKind): ItemView[] {
+  return previewItems[kind].filter((item) => !item.alreadyThere)
+}
+
+function allChosen(kind: MigrationKind): boolean {
+  const items = availableItems(kind)
+  return items.length > 0 && items.every((item) => chosenIds[kind].has(item.id))
+}
+
+function toggleAll(kind: MigrationKind): void {
+  if (job.value?.stage !== 'ready') return
+  const items = availableItems(kind)
+  const clear = allChosen(kind)
+  for (const item of items) {
+    if (clear) chosenIds[kind].delete(item.id)
+    else chosenIds[kind].add(item.id)
+  }
+}
+
+function toggleItem(kind: MigrationKind, id: string): void {
+  if (job.value?.stage !== 'ready' || !availableItems(kind).some((item) => item.id === id)) return
+  if (chosenIds[kind].has(id)) chosenIds[kind].delete(id)
+  else chosenIds[kind].add(id)
+}
+
 async function begin(): Promise<void> {
-  if (!job.value || !removalConfirmed.value || !selectionMatchesJob.value) return
+  if (!job.value || !chosenCount.value || !previewComplete.value || !removalConfirmed.value || !selectionMatchesJob.value) return
   error.value = ''
   busy.value = true
   try {
@@ -269,6 +317,8 @@ async function begin(): Promise<void> {
       removeFollowing: removeSource.following,
       removeBookmarks: removeSource.bookmarks,
       removeConfirmation: wantsRemoval.value ? removeConfirmation.value : '',
+      followingIds: [...chosenIds.following],
+      bookmarkIds: [...chosenIds.bookmarks],
     })
     job.value = data.job
     startPolling()
@@ -284,6 +334,18 @@ async function cancel(): Promise<void> {
     job.value = data.job
     if (data.job.stage === 'cancelled') stopPolling()
   } catch (cause) { showError(cause) }
+}
+
+async function resume(): Promise<void> {
+  if (job.value?.stage !== 'paused') return
+  error.value = ''
+  busy.value = true
+  try {
+    const data = await api<{ job: JobView }>(`/jobs/${job.value.id}/resume`, {})
+    job.value = data.job
+    startPolling()
+  } catch (cause) { showError(cause) }
+  finally { busy.value = false }
 }
 
 onMounted(() => { void restoreSession() })
@@ -410,29 +472,30 @@ onUnmounted(stopPolling)
             <div v-if="job.selected.bookmarks" class="summary-card"><span>收藏的推文</span><strong>{{ job.summary.bookmarks.source }}</strong><small>待新增 {{ job.summary.bookmarks.toCopy }} · 已有 {{ job.summary.bookmarks.alreadyThere }}</small><small>新账号总收藏 {{ job.scanProgress.bookmarks.target.total ?? job.scanProgress.bookmarks.target.read }}</small></div>
           </div>
           <div v-if="job.stage !== 'failed' || job.progress.total > 0" class="preview-block">
-            <div class="preview-header"><h3>内容预览</h3><div class="tabs"><button v-if="job.selected.following" type="button" :class="{ active: previewKind === 'following' }" @click="previewKind = 'following'">关注</button><button v-if="job.selected.bookmarks" type="button" :class="{ active: previewKind === 'bookmarks' }" @click="previewKind = 'bookmarks'">收藏</button></div></div>
-            <p class="preview-explainer">“新账号已有”会跳过新增；若选择清理旧账号，它仍会在确认后从旧账号移除。</p>
+            <div class="preview-header"><div class="preview-title"><h3>内容预览</h3><label class="select-all"><input type="checkbox" :checked="allChosen(previewKind)" :disabled="job.stage !== 'ready' || loadingItems[previewKind] || !availableItems(previewKind).length" @change="toggleAll(previewKind)"> 全选 / 取消全选</label><span class="muted-note">共勾选 {{ chosenCount }} 项</span></div><div class="tabs"><button v-if="job.selected.following" type="button" :class="{ active: previewKind === 'following' }" @click="previewKind = 'following'">关注</button><button v-if="job.selected.bookmarks" type="button" :class="{ active: previewKind === 'bookmarks' }" @click="previewKind = 'bookmarks'">收藏</button></div></div>
+            <p class="preview-explainer">新账号已有的项目不可勾选；关注和收藏的勾选项会一起迁移。</p>
             <div v-if="previewItems[previewKind].length" class="item-list">
-              <a v-for="item in previewItems[previewKind]" :key="item.id" class="preview-item" :href="item.url" target="_blank" rel="noopener noreferrer">
-                <img v-if="item.avatarUrl" :src="item.avatarUrl" alt="" referrerpolicy="no-referrer"><span v-else class="item-avatar">{{ item.detail.slice(0, 1) }}</span>
-                <span class="item-copy"><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></span>
+              <div v-for="item in previewItems[previewKind]" :key="item.id" class="preview-item">
+                <input class="preview-select" type="checkbox" :aria-label="`选择 ${item.label}`" :checked="chosenIds[previewKind].has(item.id)" :disabled="item.alreadyThere || job.stage !== 'ready'" @change="toggleItem(previewKind, item.id)">
+                <a class="preview-link" :href="item.url" target="_blank" rel="noopener noreferrer"><img v-if="item.avatarUrl" :src="item.avatarUrl" alt="" referrerpolicy="no-referrer"><span v-else class="item-avatar">{{ item.detail.slice(0, 1) }}</span><span class="item-copy"><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></span></a>
                 <span :class="['item-status', item.alreadyThere ? 'already' : 'new']">{{ item.alreadyThere ? '新账号已有' : '待迁移' }}</span>
-              </a>
+              </div>
             </div>
-            <p v-else class="empty-list">{{ job.summary[previewKind].source ? '正在加载预览…' : '没有可迁移的项目。' }}</p>
-            <button v-if="previewItems[previewKind].length < job.summary[previewKind].source" class="load-more" type="button" :disabled="loadingItems[previewKind]" @click="loadItems(previewKind)">{{ loadingItems[previewKind] ? '正在加载…' : '加载更多' }}</button>
+            <p v-else class="empty-list">{{ loadingItems[previewKind] ? '正在加载完整预览…' : '没有可迁移的项目。' }}</p>
           </div>
 
           <div v-if="job.stage === 'ready'" class="execution-panel">
-            <div><h3>迁移后处理旧账号</h3><p>默认保留旧账号内容。只会在目标账号确认已有该项后移除。</p></div>
+            <div><h3>迁移后处理旧账号</h3><p>只迁移预览中勾选的项目。默认保留旧账号内容；可选在目标账号确认拥有后移除这些项目。</p></div>
             <p v-if="!selectionMatchesJob" class="inline-warning">迁移内容已改变，请点击“重新扫描”更新预览。</p>
-            <div class="remove-options"><label v-if="job.selected.following"><input v-model="removeSource.following" type="checkbox"> 移除旧账号的关注</label><label v-if="job.selected.bookmarks"><input v-model="removeSource.bookmarks" type="checkbox"> 移除旧账号的收藏</label></div>
+            <p v-if="!chosenCount" class="inline-warning">请先在预览中勾选至少一项待迁移内容。</p>
+            <div class="remove-options"><label v-if="job.selected.following"><input v-model="removeSource.following" type="checkbox"> 移除旧账号中本次勾选的关注</label><label v-if="job.selected.bookmarks"><input v-model="removeSource.bookmarks" type="checkbox"> 移除旧账号中本次勾选的收藏</label></div>
             <div v-if="wantsRemoval" class="confirmation"><label for="remove-confirmation">请输入 <strong>@{{ job.source.screenName }}</strong> 确认清理旧账号</label><input id="remove-confirmation" v-model="removeConfirmation" autocomplete="off" spellcheck="false" :placeholder="`@${job.source.screenName}`"></div>
-            <div class="action-row"><button class="button button-primary" type="button" :disabled="busy || !removalConfirmed || !selectionMatchesJob" @click="begin">{{ busy ? '正在启动…' : wantsRemoval ? '确认并开始迁移' : '开始迁移' }} <span aria-hidden="true">→</span></button><span class="muted-note">迁移过程中可以停止，已完成的操作不会撤销。</span></div>
+            <div class="action-row"><button class="button button-primary" type="button" :disabled="busy || !chosenCount || !previewComplete || loadingItems.following || loadingItems.bookmarks || !removalConfirmed || !selectionMatchesJob" @click="begin">{{ busy ? '正在启动…' : wantsRemoval ? '确认并开始迁移' : '开始迁移' }}（{{ chosenCount }}）<span aria-hidden="true">→</span></button><span class="muted-note">迁移过程中可以停止，已完成的操作不会撤销。</span></div>
           </div>
 
+          <div v-if="job.stage === 'paused'" class="status-panel pause-panel"><div><strong>限流暂停</strong><p>{{ job.message }} 预计 {{ retryCountdown }} 后自动继续。</p></div><button class="text-button" type="button" :disabled="busy" @click="resume">手动继续</button><button class="text-button" type="button" @click="cancel">停止任务</button></div>
           <div v-if="job.stage === 'running' || (job.progress.total > 0 && job.stage !== 'ready')" class="progress-panel">
-            <div class="progress-top"><strong>{{ job.stage === 'running' ? '正在迁移' : job.stage === 'completed' ? '迁移已结束' : job.stage === 'cancelled' ? '迁移已停止' : '迁移中断' }}</strong><span>{{ job.progress.processed }} / {{ job.progress.total }}</span></div>
+            <div class="progress-top"><strong>{{ job.stage === 'running' ? '正在迁移' : job.stage === 'paused' ? '限流暂停' : job.stage === 'completed' ? '迁移已结束' : job.stage === 'cancelled' ? '迁移已停止' : '迁移中断' }}</strong><span>{{ job.progress.processed }} / {{ job.progress.total }}</span></div>
             <div class="progress-track"><div :style="{ width: `${percentage}%` }"></div></div>
             <div class="progress-stats"><span>新增 {{ job.progress.copied }}</span><span>目标已有 {{ job.progress.alreadyThere }}</span><span>从旧账号移除 {{ job.progress.removed }}</span><span>失败 {{ job.progress.failed }}</span></div>
             <button v-if="job.stage === 'running'" class="text-button" type="button" @click="cancel">停止任务</button>

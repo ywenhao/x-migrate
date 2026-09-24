@@ -117,10 +117,28 @@ let discoveredIds: QueryIds = {}
 let discoveredAt = 0
 
 export class XApiError extends Error {
-  constructor(message: string, public readonly status?: number) {
+  constructor(message: string, public readonly status?: number, public readonly retryAt: number | null = null) {
     super(message)
     this.name = 'XApiError'
   }
+}
+
+function rateLimitReset(headers: Record<string, string | string[] | undefined>): number | null {
+  const value = (name: string) => {
+    const raw = headers[name]
+    return Array.isArray(raw) ? raw[0] : raw
+  }
+  const now = Date.now()
+  const candidates: number[] = []
+  const retryAfter = value('retry-after')
+  if (retryAfter) {
+    const seconds = Number(retryAfter)
+    const time = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(retryAfter)
+    if (Number.isFinite(time) && time > now) candidates.push(time)
+  }
+  const reset = Number(value('x-rate-limit-reset')) * 1000
+  if (Number.isFinite(reset) && reset > now) candidates.push(reset)
+  return candidates.length ? Math.max(...candidates) : null
 }
 
 function asObject(value: unknown): JsonObject {
@@ -430,7 +448,7 @@ export class XClient {
       throw new XApiError('X 拒绝了会话。请重新复制 auth_token 和 ct0，或确认账号没有被限制。', response.statusCode)
     }
     if (response.statusCode === 429) {
-      throw new XApiError('X 接口已限流。请稍后重新扫描或迁移。', 429)
+      throw new XApiError('X 接口已限流。请稍后重新扫描或迁移。', 429, rateLimitReset(response.headers))
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       const detail = safeErrorMessage(parsed)
@@ -706,7 +724,9 @@ export class XClient {
     const raw = await response.body.text()
     let body: unknown
     try { body = JSON.parse(raw) } catch { body = {} }
-    if (response.statusCode === 429) throw new XApiError('X 接口已限流。请稍后继续。', 429)
+    if (response.statusCode === 429) {
+      throw new XApiError('X 接口已限流。请稍后继续。', 429, rateLimitReset(response.headers))
+    }
     if (response.statusCode < 200 || response.statusCode >= 300 || safeErrorMessage(body)) {
       throw new XApiError(`${action === 'create' ? '关注' : '取消关注'}失败（${response.statusCode}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`, response.statusCode)
     }

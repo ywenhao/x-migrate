@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Plugin } from 'vite'
 import type { JobProgress, JobStage, JobView, ItemsPage, MigrationKind, ScanListProgress } from '../src/types.ts'
@@ -7,7 +7,8 @@ import { XApiError, XClient, validateQueryIds, validateSessionInput, type Accoun
 const SESSION_TTL = 3 * 60 * 60 * 1000
 const JOB_TTL = 12 * 60 * 60 * 1000
 const WRITE_DELAY = 900
-const MAX_BODY = 24 * 1024
+const FALLBACK_RATE_WAIT = 15 * 60 * 1000
+const MAX_BODY = 2 * 1024 * 1024
 
 interface Session {
   id: string
@@ -29,12 +30,16 @@ interface Job {
   source: Account
   target: Account
   selected: Record<MigrationKind, boolean>
+  selectedItemIds: Record<MigrationKind, string[]>
   scanProgress: JobView['scanProgress']
   removeSource: Record<MigrationKind, boolean>
   data: Record<MigrationKind, KindData>
   stage: JobStage
   message: string
   progress: JobProgress
+  retryAt: number | null
+  resumeTimer: ReturnType<typeof setTimeout> | null
+  wakeResume: (() => void) | null
   errors: string[]
   cancelled: boolean
   scanAbort: AbortController | null
@@ -92,6 +97,13 @@ function requireText(value: unknown, name: string): string {
   return value.trim()
 }
 
+function requireSelectedIds(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !/^\d{1,25}$/.test(id))) {
+    throw new HttpError(`${label}勾选项格式错误。`, 400)
+  }
+  return [...new Set(value as string[])]
+}
+
 function getSession(id: unknown): Session {
   const session = sessions.get(requireText(id, '会话 ID'))
   if (!session) throw new HttpError('会话已失效，请重新连接账号。', 404)
@@ -126,6 +138,7 @@ function snapshot(job: Job): JobView {
     scanProgress: job.scanProgress,
     summary: { following: summary('following'), bookmarks: summary('bookmarks') },
     progress: job.progress,
+    retryAt: job.retryAt,
     errors: job.errors.slice(-30),
     removeSource: job.removeSource,
   }
@@ -218,43 +231,71 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+async function pauseForRateLimit(job: Job, error: XApiError): Promise<boolean> {
+  const now = Date.now()
+  job.retryAt = Math.max(now + 5_000, Math.min(error.retryAt ?? now + FALLBACK_RATE_WAIT, now + 60 * 60 * 1000))
+  job.stage = 'paused'
+  job.message = `X 接口限流，预计 ${new Date(job.retryAt).toLocaleTimeString('zh-CN', { hour12: false })} 自动继续。`
+  await new Promise<void>((resolve) => {
+    job.wakeResume = resolve
+    job.resumeTimer = setTimeout(resolve, Math.max(0, job.retryAt! - Date.now()))
+  })
+  if (job.resumeTimer) clearTimeout(job.resumeTimer)
+  job.resumeTimer = null
+  job.wakeResume = null
+  job.retryAt = null
+  if (cancelCheck(job)) return false
+  job.stage = 'running'
+  job.message = '继续迁移…'
+  return true
+}
+
 async function runMigration(job: Job, source: Session, target: Session): Promise<void> {
   try {
     for (const kind of ['following', 'bookmarks'] as const) {
       if (!job.selected[kind]) continue
       const data = job.data[kind]
-      for (const item of data.source) {
+      const items = new Map(data.source.map((item) => [item.id, item]))
+      for (const id of job.selectedItemIds[kind]) {
+        const item = items.get(id)
+        if (!item) throw new Error('勾选项不在扫描结果中，请重新扫描。')
         if (cancelCheck(job)) return
-        job.message = `正在处理${kind === 'following' ? '关注' : '收藏'} ${job.progress.processed + 1} / ${job.progress.total}`
-        try {
-          if (data.targetIds.has(item.id)) {
-            job.progress.alreadyThere++
-          } else {
-            if (kind === 'following') await target.client.follow(item.id)
-            else await target.client.addBookmark(item.id)
-            data.targetIds.add(item.id)
-            job.progress.copied++
-            await delay(WRITE_DELAY)
-          }
-          // A source item is removed only after the target already contains it
-          // or its create request has succeeded.
-          if (job.removeSource[kind]) {
-            if (kind === 'following') await source.client.unfollow(item.id)
-            else await source.client.removeBookmark(item.id)
-            job.progress.removed++
-            await delay(WRITE_DELAY)
-          }
-        } catch (error) {
-          job.progress.failed++
-          const reason = error instanceof Error ? error.message : '未知错误'
-          if (job.errors.length < 100) job.errors.push(`${item.detail}：${reason}`)
-          if (error instanceof XApiError && error.status === 429) {
+        let targetReady = data.targetIds.has(id)
+        if (targetReady) job.progress.alreadyThere++
+        while (true) {
+          if (cancelCheck(job)) return
+          job.message = `正在处理${kind === 'following' ? '关注' : '收藏'} ${job.progress.processed + 1} / ${job.progress.total}`
+          try {
+            if (!targetReady) {
+              if (kind === 'following') await target.client.follow(id)
+              else await target.client.addBookmark(id)
+              targetReady = true
+              data.targetIds.add(id)
+              job.progress.copied++
+              await delay(WRITE_DELAY)
+            }
+            if (cancelCheck(job)) return
+            // Only a selected item confirmed on the target may be removed.
+            if (job.removeSource[kind]) {
+              if (kind === 'following') await source.client.unfollow(id)
+              else await source.client.removeBookmark(id)
+              job.progress.removed++
+              await delay(WRITE_DELAY)
+            }
             job.progress.processed++
-            jobError(job, error)
-            return
+            break
+          } catch (error) {
+            if (error instanceof XApiError && error.status === 429) {
+              if (!await pauseForRateLimit(job, error)) return
+              continue
+            }
+            job.progress.failed++
+            job.progress.processed++
+            const reason = error instanceof Error ? error.message : '未知错误'
+            if (job.errors.length < 100) job.errors.push(`${item.detail}：${reason}`)
+            break
           }
         }
-        job.progress.processed++
       }
     }
     job.stage = 'completed'
@@ -262,8 +303,12 @@ async function runMigration(job: Job, source: Session, target: Session): Promise
       ? '迁移结束，部分项目失败。请查看记录，稍后重新扫描并重试。'
       : '迁移完成。'
   } catch (error) {
-    jobError(job, error)
+    if (!cancelCheck(job)) jobError(job, error)
   } finally {
+    if (job.resumeTimer) clearTimeout(job.resumeTimer)
+    job.resumeTimer = null
+    job.wakeResume = null
+    job.retryAt = null
     if (activeJobId === job.id) activeJobId = null
   }
 }
@@ -275,7 +320,7 @@ function prune(): void {
   }
   for (const [id, session] of sessions) {
     const inUse = [...jobs.values()].some((job) =>
-      (job.stage === 'scanning' || job.stage === 'running') &&
+      (job.stage === 'scanning' || job.stage === 'running' || job.stage === 'paused') &&
       (job.sourceSession === id || job.targetSession === id))
     if (!inUse && now - session.touchedAt > SESSION_TTL) {
       sessions.delete(id)
@@ -289,6 +334,8 @@ function checkOrigin(request: IncomingMessage): void {
   if (!origin) return
   try {
     const source = new URL(origin)
+    const publicOrigin = process.env.X_MIGRATE_APP_ORIGIN
+    if (publicOrigin && source.origin === new URL(publicOrigin).origin) return
     if (source.host === request.headers.host &&
       ['http:', 'https:'].includes(source.protocol) &&
       ['127.0.0.1', 'localhost', '[::1]'].includes(source.hostname)) return
@@ -296,13 +343,29 @@ function checkOrigin(request: IncomingMessage): void {
   throw new HttpError('不接受其他网站发起的请求。', 403)
 }
 
-async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+function checkProxySecret(request: IncomingMessage): void {
+  const expected = process.env.X_MIGRATE_PROXY_SECRET
+  const actual = request.headers['x-x-migrate-proxy-key']
+  if (!expected || typeof actual !== 'string') throw new HttpError('请求未通过代理认证。', 403)
+  const expectedBytes = Buffer.from(expected)
+  const actualBytes = Buffer.from(actual)
+  if (expectedBytes.length !== actualBytes.length || !timingSafeEqual(expectedBytes, actualBytes)) {
+    throw new HttpError('请求未通过代理认证。', 403)
+  }
+}
+
+async function handle(request: IncomingMessage, response: ServerResponse, requireProxySecret = false): Promise<void> {
   try {
     const url = new URL(request.url || '/', 'http://127.0.0.1')
     if (!url.pathname.startsWith('/api/')) throw new HttpError('接口不存在。', 404)
+    if (requireProxySecret) checkProxySecret(request)
     checkOrigin(request)
     prune()
     const method = request.method || 'GET'
+    if (method === 'GET' && url.pathname === '/api/health') {
+      respond(response, 200, { ok: true })
+      return
+    }
     if (method === 'POST' && url.pathname === '/api/connect') {
       const body = await readBody(request)
       const { authToken, ct0 } = validateSessionInput(body.authToken, body.ct0)
@@ -331,7 +394,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       const body = await readBody(request)
       const session = getSession(body.sessionId)
       const busy = [...jobs.values()].some((job) =>
-        (job.stage === 'scanning' || job.stage === 'running') &&
+        (job.stage === 'scanning' || job.stage === 'running' || job.stage === 'paused') &&
         (job.sourceSession === session.id || job.targetSession === session.id))
       if (busy) throw new HttpError('请先停止正在执行的任务。', 409)
       sessions.delete(session.id)
@@ -360,6 +423,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         source: source.account,
         target: target.account,
         selected,
+        selectedItemIds: { following: [], bookmarks: [] },
         scanProgress: {
           following: {
             source: emptyScanList(source.account.followingCount ?? null),
@@ -372,6 +436,9 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         stage: 'scanning',
         message: '准备扫描…',
         progress: { processed: 0, total: 0, copied: 0, alreadyThere: 0, removed: 0, failed: 0 },
+        retryAt: null,
+        resumeTimer: null,
+        wakeResume: null,
         errors: [],
         cancelled: false,
         scanAbort: new AbortController(),
@@ -384,7 +451,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       return
     }
 
-    const match = url.pathname.match(/^\/api\/jobs\/([a-f\d-]{36})(?:\/(items|start|cancel))?$/)
+    const match = url.pathname.match(/^\/api\/jobs\/([a-f\d-]{36})(?:\/(items|start|cancel|resume))?$/)
     if (match) {
       const job = getJob(match[1])
       const action = match[2] || ''
@@ -409,10 +476,24 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         } else if (job.stage === 'running') {
           job.cancelled = true
           job.message = '正在停止，等待当前 X 操作结束…'
+        } else if (job.stage === 'paused') {
+          job.cancelled = true
+          cancelCheck(job)
+          job.retryAt = null
+          job.wakeResume?.()
         } else if (job.stage === 'ready') {
           job.cancelled = true
           cancelCheck(job)
         }
+        respond(response, 200, { job: snapshot(job) })
+        return
+      }
+      if (method === 'POST' && action === 'resume') {
+        if (job.stage !== 'paused') throw new HttpError('任务当前没有暂停。', 409)
+        job.stage = 'running'
+        job.retryAt = null
+        job.message = '手动继续迁移…'
+        job.wakeResume?.()
         respond(response, 200, { job: snapshot(job) })
         return
       }
@@ -422,6 +503,21 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         const source = getSession(job.sourceSession)
         const target = getSession(job.targetSession)
         const body = await readBody(request)
+        const selectedItemIds = {
+          following: requireSelectedIds(body.followingIds, '关注'),
+          bookmarks: requireSelectedIds(body.bookmarkIds, '收藏'),
+        }
+        for (const kind of ['following', 'bookmarks'] as const) {
+          if (!job.selected[kind] && selectedItemIds[kind].length) throw new HttpError('勾选项不属于本次扫描内容。', 400)
+          const available = new Set(job.data[kind].source
+            .filter((item) => !job.data[kind].initialTargetIds.has(item.id))
+            .map((item) => item.id))
+          if (selectedItemIds[kind].some((id) => !available.has(id))) {
+            throw new HttpError('勾选项不存在或新账号已经拥有，请重新扫描。', 400)
+          }
+        }
+        const totalSelected = selectedItemIds.following.length + selectedItemIds.bookmarks.length
+        if (!totalSelected) throw new HttpError('请至少勾选一项待迁移内容。', 400)
         const removeSource = {
           following: job.selected.following && body.removeFollowing === true,
           bookmarks: job.selected.bookmarks && body.removeBookmarks === true,
@@ -430,9 +526,9 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
           body.removeConfirmation !== `@${job.source.screenName}`) {
           throw new HttpError(`移除旧账号内容前，请输入 @${job.source.screenName} 确认。`, 400)
         }
+        job.selectedItemIds = selectedItemIds
         job.removeSource = removeSource
-        job.progress.total = (job.selected.following ? job.data.following.source.length : 0) +
-          (job.selected.bookmarks ? job.data.bookmarks.source.length : 0)
+        job.progress.total = totalSelected
         job.stage = 'running'
         job.message = '开始迁移…'
         activeJobId = job.id
@@ -445,6 +541,10 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   } catch (error) {
     fail(response, error)
   }
+}
+
+export function xApiNodeHandler(request: IncomingMessage, response: ServerResponse): void {
+  void handle(request, response, true)
 }
 
 export function xApiPlugin(): Plugin {
