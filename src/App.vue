@@ -9,6 +9,9 @@ const credentials = reactive({
   source: { authToken: '', ct0: '' },
   target: { authToken: '', ct0: '' },
 })
+const curlInput = reactive<Record<Role, string>>({ source: '', target: '' })
+const curlMessage = reactive<Record<Role, string>>({ source: '', target: '' })
+const curlInvalid = reactive<Record<Role, boolean>>({ source: false, target: false })
 const connections = reactive<Record<Role, Connection | null>>({ source: null, target: null })
 const connecting = ref<Role | null>(null)
 const proxy = ref('')
@@ -56,6 +59,45 @@ function showError(cause: unknown): void {
   error.value = cause instanceof Error ? cause.message : '发生未知错误。'
 }
 
+function parseCurl(role: Role): void {
+  const command = curlInput[role].replace(/\\\r?\n/g, ' ')
+  const options = /(?:^|\s)(-b|--cookie|-H|--header)(?:\s+|=)(?:'([^']*)'|"((?:\\.|[^"\\])*)"|(\S+))/gi
+  credentials[role].authToken = ''
+  credentials[role].ct0 = ''
+
+  for (const match of command.matchAll(options)) {
+    const option = match[1].toLowerCase()
+    const argument = match[2] ?? match[3]?.replace(/\\(["\\])/g, '$1') ?? match[4] ?? ''
+    const cookie = option === '-b' || option === '--cookie'
+      ? argument
+      : /^cookie\s*:/i.test(argument) ? argument.replace(/^cookie\s*:\s*/i, '') : ''
+    if (!cookie) continue
+
+    const values = new Map<string, string>()
+    for (const part of cookie.split(';')) {
+      const equals = part.indexOf('=')
+      if (equals < 0) continue
+      const name = part.slice(0, equals).trim()
+      const value = part.slice(equals + 1).trim().replace(/^"(.*)"$/s, '$1')
+      if (name === 'auth_token' || name === 'ct0') values.set(name, value)
+    }
+
+    const authToken = values.get('auth_token')
+    const ct0 = values.get('ct0')
+    if (authToken && ct0) {
+      credentials[role].authToken = authToken
+      credentials[role].ct0 = ct0
+      curlInput[role] = ''
+      curlInvalid[role] = false
+      curlMessage[role] = '已提取 auth_token 和 ct0，请连接账号。'
+      return
+    }
+  }
+
+  curlInvalid[role] = true
+  curlMessage[role] = '未在 curl 的 Cookie 中同时找到 auth_token 和 ct0。'
+}
+
 async function connect(role: Role): Promise<void> {
   error.value = ''
   connecting.value = role
@@ -69,6 +111,7 @@ async function connect(role: Role): Promise<void> {
     connections[role] = data
     credentials[role].authToken = ''
     credentials[role].ct0 = ''
+    curlMessage[role] = ''
     job.value = null
   } catch (cause) { showError(cause) }
   finally { connecting.value = null }
@@ -208,7 +251,7 @@ onUnmounted(stopPolling)
       </div>
 
       <section class="section" aria-labelledby="connection-heading">
-        <div class="section-heading"><span class="section-number">01</span><div><h2 id="connection-heading">连接两个账号</h2><p>从 X 网站 Cookie 中复制各账号的 <code>auth_token</code> 和 <code>ct0</code>。</p></div></div>
+        <div class="section-heading"><span class="section-number">01</span><div><h2 id="connection-heading">连接两个账号</h2><p>分别粘贴 X 请求的 curl 自动提取 Cookie，或手动填写 <code>auth_token</code> 和 <code>ct0</code>。</p></div></div>
         <div class="account-grid">
           <article class="account-card">
             <div class="card-top"><span class="account-role">来源账号</span><span class="account-tag source-tag">旧账号</span></div>
@@ -222,6 +265,11 @@ onUnmounted(stopPolling)
               <button class="text-button" type="button" :disabled="taskActive" @click="disconnect('source')">断开连接</button>
             </template>
             <form v-else @submit.prevent="connect('source')">
+              <label for="source-curl">从 curl 提取 Cookie</label>
+              <textarea id="source-curl" v-model="curlInput.source" rows="3" autocomplete="off" spellcheck="false" placeholder="粘贴旧账号的 X 请求 curl 命令"></textarea>
+              <button class="parse-button" type="button" :disabled="!curlInput.source.trim()" @click="parseCurl('source')">解析 curl</button>
+              <p v-if="curlMessage.source" :class="['curl-message', { invalid: curlInvalid.source }]" role="status">{{ curlMessage.source }}</p>
+              <div class="field-divider">或手动填写</div>
               <label for="source-auth">auth_token</label>
               <input id="source-auth" v-model="credentials.source.authToken" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴旧账号 auth_token" required>
               <label for="source-ct0">ct0</label>
@@ -244,6 +292,11 @@ onUnmounted(stopPolling)
               <button class="text-button" type="button" :disabled="taskActive" @click="disconnect('target')">断开连接</button>
             </template>
             <form v-else @submit.prevent="connect('target')">
+              <label for="target-curl">从 curl 提取 Cookie</label>
+              <textarea id="target-curl" v-model="curlInput.target" rows="3" autocomplete="off" spellcheck="false" placeholder="粘贴新账号的 X 请求 curl 命令"></textarea>
+              <button class="parse-button" type="button" :disabled="!curlInput.target.trim()" @click="parseCurl('target')">解析 curl</button>
+              <p v-if="curlMessage.target" :class="['curl-message', { invalid: curlInvalid.target }]" role="status">{{ curlMessage.target }}</p>
+              <div class="field-divider">或手动填写</div>
               <label for="target-auth">auth_token</label>
               <input id="target-auth" v-model="credentials.target.authToken" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新账号 auth_token" required>
               <label for="target-ct0">ct0</label>
@@ -253,7 +306,7 @@ onUnmounted(stopPolling)
           </article>
         </div>
         <p v-if="sameAccount" class="inline-warning">两个会话属于同一个 X 账号，请更换其中一个。</p>
-        <details class="help-details"><summary>在哪里找到 Cookie？</summary><p>分别登录两个 X 账号，在浏览器开发者工具的“应用 / Application → Cookies → https://x.com”中复制 <code>auth_token</code> 和 <code>ct0</code> 的值。会话相当于密码，请只在你信任的本机使用。</p></details>
+        <details class="help-details"><summary>在哪里找到 Cookie？</summary><p>分别登录两个 X 账号，在浏览器开发者工具的 Network 中选择带 Cookie 的 X 请求，复制为 curl 后粘贴到对应账号；也可以在“应用 / Application → Cookies → https://x.com”中手动复制 <code>auth_token</code> 和 <code>ct0</code> 的值。会话相当于密码，请只在你信任的本机使用。</p></details>
         <details class="help-details advanced"><summary>高级设置：代理与查询 ID</summary>
           <div class="advanced-content">
             <label for="proxy">网络代理</label><input id="proxy" v-model="proxy" autocomplete="off" spellcheck="false" placeholder="留空自动检测；或填 127.0.0.1:7890 / direct">

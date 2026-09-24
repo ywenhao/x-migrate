@@ -1,10 +1,10 @@
 :root { font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif; color: #17231f; background: #f5f7f3; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .52; }
-input:focus-visible, button:focus-visible, summary:focus-visible, a:focus-visible { outline: 3px solid #77b899; outline-offset: 2px; }
+input:focus-visible, textarea:focus-visible, button:focus-visible, summary:focus-visible, a:focus-visible { outline: 3px solid #77b899; outline-offset: 2px; }
 .app-shell { display: flex; min-height: 100vh; }
 .sidebar { width: 284px; flex: none; min-height: 100vh; padding: 30px 25px; background: #12372d; color: #f4faf5; display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; }
 .brand { display: flex; align-items: center; gap: 11px; font-size: 17px; font-weight: 700; letter-spacing: .01em; }
@@ -44,7 +44,14 @@ code { background: #edf3ed; padding: 1px 4px; border-radius: 4px; color: #2b684b
 .account-card label, .advanced-content > label, .confirmation label { color: #4a5e50; font-size: 11px; font-weight: 700; margin-bottom: 7px; }
 .account-card input { margin-bottom: 15px; }
 input[type=password], input[type=text], .advanced-content input, .confirmation input { width: 100%; border: 1px solid #d9e2d9; background: #fff; color: #223a2b; border-radius: 8px; min-height: 39px; padding: 8px 11px; font-size: 12px; }
-input::placeholder { color: #a1afa3; }
+.account-card textarea { width: 100%; min-height: 75px; resize: vertical; border: 1px solid #d9e2d9; background: #fff; color: #223a2b; border-radius: 8px; padding: 9px 11px; font-size: 12px; line-height: 1.5; }
+input::placeholder, textarea::placeholder { color: #a1afa3; }
+.parse-button { align-self: flex-start; border: 0; background: none; padding: 8px 0; color: #3b7956; font-size: 11px; font-weight: 700; }
+.parse-button:hover:not(:disabled) { text-decoration: underline; }
+.field-divider { display: flex; align-items: center; gap: 9px; margin: 8px 0 17px; color: #9aa79b; font-size: 10px; white-space: nowrap; }
+.field-divider::before, .field-divider::after { content: ''; height: 1px; background: #e5ebe4; flex: 1; }
+.curl-message { color: #4a8060; font-size: 11px; line-height: 1.5; margin: 1px 0 5px; }
+.curl-message.invalid { color: #9e5035; }
 .transfer-arrow { color: #7ca787; font-size: 26px; text-align: center; pointer-events: none; }
 .button { border: 0; border-radius: 8px; padding: 11px 17px; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 20px; font-size: 12px; font-weight: 700; transition: transform .15s ease, background .15s ease; }
 .button:not(:disabled):hover { transform: translateY(-1px); }
