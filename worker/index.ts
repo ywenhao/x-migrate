@@ -1,26 +1,18 @@
 import { Hono } from 'hono'
-import { basicAuth } from 'hono/basic-auth'
 
 type Bindings = {
   ASSETS: { fetch(request: Request): Promise<Response> }
   API_ORIGIN?: string
   API_PROXY_SECRET?: string
-  APP_USERNAME?: string
-  APP_PASSWORD?: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
 
-app.use('*', async (context, next) => {
-  const username = context.env.APP_USERNAME
-  const password = context.env.APP_PASSWORD
-  if (!username || !password || password.length < 16) {
-    return context.json({ error: 'Worker 访问密码尚未配置。' }, 503)
-  }
-  return basicAuth({ username, password, realm: 'X Migrate' })(context, next)
-})
-
 app.all('/api/*', async (context) => {
+  const browserOrigin = context.req.header('origin')
+  if (browserOrigin && browserOrigin !== new URL(context.req.url).origin) {
+    return context.json({ error: '不接受其他网站发起的请求。' }, 403)
+  }
   const configuredOrigin = context.env.API_ORIGIN
   const secret = context.env.API_PROXY_SECRET
   if (!configuredOrigin || !secret || secret.length < 32) {

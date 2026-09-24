@@ -334,8 +334,6 @@ function checkOrigin(request: IncomingMessage): void {
   if (!origin) return
   try {
     const source = new URL(origin)
-    const publicOrigin = process.env.X_MIGRATE_APP_ORIGIN
-    if (publicOrigin && source.origin === new URL(publicOrigin).origin) return
     if (source.host === request.headers.host &&
       ['http:', 'https:'].includes(source.protocol) &&
       ['127.0.0.1', 'localhost', '[::1]'].includes(source.hostname)) return
@@ -359,7 +357,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, requir
     const url = new URL(request.url || '/', 'http://127.0.0.1')
     if (!url.pathname.startsWith('/api/')) throw new HttpError('接口不存在。', 404)
     if (requireProxySecret) checkProxySecret(request)
-    checkOrigin(request)
+    else checkOrigin(request)
     prune()
     const method = request.method || 'GET'
     if (method === 'GET' && url.pathname === '/api/health') {
