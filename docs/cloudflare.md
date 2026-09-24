@@ -15,10 +15,10 @@ The default `workers.dev` page is public. **Protect the site with Cloudflare Acc
 3. Sign in with `pnpm exec wrangler login`, then run `pnpm run cf:deploy`.
 4. Configure visitor access for the Worker hostname before using real X sessions.
 
-`wrangler.jsonc` already points to `worker/index.ts` and the `dist` asset directory. No deployment variables or secrets are needed for this architecture.
+`wrangler.jsonc` points to `worker/index.ts`, builds the Vue app before deployment, and serves the `dist` asset directory. No deployment variables or secrets are needed for this architecture.
 
 ## Local Worker preview
 
-Run `pnpm run cf:dev`. Wrangler builds the same Vue app and starts the same API routes locally. A separate Node API is not needed.
+Run `pnpm run cf:dev`. Wrangler builds the Vue app and starts the same API routes locally. A separate Node API is not needed.
 
 The Worker uses Cloudflare's network path to reach X and does not support a local HTTP proxy. Node deployments can use `X_MIGRATE_PROXY` or standard proxy environment variables, as described in the README. The dry run checks packaging; it does not verify access to X or perform account actions.

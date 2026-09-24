@@ -15,7 +15,7 @@ Worker 在同一次部署中提供 Vue 页面并处理 `/api/*`。它直接请�
 3. 执行 `pnpm exec wrangler login` 登录，再执行 `pnpm run cf:deploy` 发布。
 4. 使用真实 X 会话前，为 Worker 域名配置访客访问控制。
 
-`wrangler.jsonc` 已指向 `worker/index.ts` 和 `dist` 静态资源目录。当前架构无需部署变量或密钥。
+`wrangler.jsonc` 已指向 `worker/index.ts`，部署前自动构建 Vue 页面，并提供 `dist` 静态资源。当前架构无需部署变量或密钥。
 
 ## 本地预览 Worker
 
