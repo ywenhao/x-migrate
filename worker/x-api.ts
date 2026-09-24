@@ -964,7 +964,7 @@ export class XClient {
     } catch {
       body = {}
     }
-    if (response.statusCode === 429) {
+    if (response.status === 429) {
       throw new XApiError(
         'X 接口已限流。请稍后继续。',
         429,
@@ -972,12 +972,12 @@ export class XClient {
         'X rate limited this request. Resume later.',
       )
     }
-    if (response.statusCode < 200 || response.statusCode >= 300 || safeErrorMessage(body)) {
+    if (response.status < 200 || response.status >= 300 || safeErrorMessage(body)) {
       throw new XApiError(
-        `${action === 'create' ? '关注' : '取消关注'}失败（${response.statusCode}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`,
+        `${action === 'create' ? '关注' : '取消关注'}失败（${response.status}）${safeErrorMessage(body) ? `：${safeErrorMessage(body)}` : ''}`,
         response.status,
         null,
-        `${action === 'create' ? 'Follow' : 'Unfollow'} failed (${response.statusCode})${safeErrorMessage(body) ? `: ${safeErrorMessage(body)}` : ''}`,
+        `${action === 'create' ? 'Follow' : 'Unfollow'} failed (${response.status})${safeErrorMessage(body) ? `: ${safeErrorMessage(body)}` : ''}`,
       )
     }
   }
