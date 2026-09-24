@@ -186,7 +186,7 @@ export const messages = {
     cookieHelpTitle: '在哪里找到 Cookie？',
     cookieHelp:
       '分别登录两个 X 账号，在浏览器开发者工具的 Network 中选择带 Cookie 的 X 请求，复制为 curl 后粘贴到对应账号；也可以在“应用 / Application → Cookies → https://x.com”中手动复制 auth_token 和 ct0 的值。会话相当于密码，请只在你信任的服务上使用。',
-    advancedTitle: '高级设置：代理与查询 ID',
+    advancedTitle: '高级设置：查询 ID',
     networkProxy: '网络代理',
     proxyPlaceholder: '留空自动检测；或填 127.0.0.1:7890 / direct',
     proxyHelp:
