@@ -1,4 +1,5 @@
 import { ClientTransaction } from 'x-client-transaction-id'
+function sleep(ms: number, signal?: AbortSignal): Promise<void> { return new Promise((resolve, reject) => { const timer = setTimeout(resolve, ms); signal?.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason) }, { once: true }) }) }
 import { parseHTML } from 'linkedom'
 import features from './features.json' with { type: 'json' }
 
@@ -507,10 +508,10 @@ export class XClient {
     } catch {
       parsed = {}
     }
-    if (response.status === 401 || response.statusCode === 403) {
+    if (response.status === 401 || response.status === 403) {
       throw new XApiError(
         'X 拒绝了会话。请重新复制 auth_token 和 ct0，或确认账号没有被限制。',
-        response.statusCode,
+        response.status,
         null,
         'X rejected the session. Copy fresh auth_token and ct0 values and check that the account is unrestricted.',
       )
@@ -527,10 +528,10 @@ export class XClient {
       const detail = safeErrorMessage(parsed)
       const endpoint = path.startsWith('/i/api/graphql/') ? path.split('/')[5] : path.split('?')[0]
       throw new XApiError(
-        `X 接口 ${endpoint} 返回 ${response.statusCode}${detail ? `：${detail}` : ''}`,
-        response.statusCode,
+        `X 接口 ${endpoint} 返回 ${response.status}${detail ? `：${detail}` : ''}`,
+        response.status,
         null,
-        `X endpoint ${endpoint} returned ${response.statusCode}${detail ? `: ${detail}` : ''}`,
+        `X endpoint ${endpoint} returned ${response.status}${detail ? `: ${detail}` : ''}`,
       )
     }
     const detail = safeErrorMessage(parsed)
@@ -808,7 +809,7 @@ export class XClient {
       const scanning = operation === 'Following' || operation === 'Bookmarks'
       if (scanning && this.lastScanRequestFinishedAt) {
         const remaining = SCAN_REQUEST_GAP_MS - (Date.now() - this.lastScanRequestFinishedAt)
-        if (remaining > 0) await sleep(remaining, undefined, { signal })
+        if (remaining > 0) await sleep(remaining, signal)
       }
       try {
         return await this.json(
