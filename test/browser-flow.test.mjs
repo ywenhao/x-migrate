@@ -70,6 +70,7 @@ const second = {
 }
 
 test('browser flow resumes cleanup after a rate limit and page reload without copying again', async () => {
+  globalThis.sessionStorage = storage()
   const originalFetch = globalThis.fetch
   const actions = []
   let cleanupCalls = 0
@@ -138,6 +139,179 @@ test('browser flow resumes cleanup after a rate limit and page reload without co
   } finally {
     firstApp?.unmount()
     restoredApp?.unmount()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('scans both accounts concurrently while keeping each account sequential', async () => {
+  globalThis.sessionStorage = storage()
+  const originalFetch = globalThis.fetch
+  const bookmark = {
+    id: '401',
+    label: 'Saved post',
+    detail: '@writer',
+    url: 'https://x.com/i/web/status/401',
+    avatarUrl: null,
+  }
+  let releaseSourceFollowing = () => {}
+  const sourceFollowingHeld = new Promise((resolve) => {
+    releaseSourceFollowing = resolve
+  })
+  let targetBookmarksStarted = () => {}
+  const targetBookmarks = new Promise((resolve) => {
+    targetBookmarksStarted = resolve
+  })
+  const active = { source: 0, target: 0 }
+  const maxByRole = { source: 0, target: 0 }
+  let maxTotal = 0
+  const events = []
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    const role = body.authToken === 'source-token' ? 'source' : 'target'
+    if (url === '/api/connect')
+      return Response.json({ account: role === 'source' ? source : target })
+    assert.equal(url, '/api/page')
+    active[role]++
+    maxByRole[role] = Math.max(maxByRole[role], active[role])
+    maxTotal = Math.max(maxTotal, active.source + active.target)
+    events.push('start ' + role + ' ' + body.kind)
+    try {
+      if (role === 'source' && body.kind === 'following') await sourceFollowingHeld
+      if (role === 'target' && body.kind === 'bookmarks') targetBookmarksStarted()
+      const items =
+        body.kind === 'following'
+          ? role === 'source'
+            ? [first, second]
+            : [second]
+          : role === 'source'
+            ? [bookmark]
+            : []
+      return Response.json({ items, cursor: null })
+    } finally {
+      events.push('end ' + role + ' ' + body.kind)
+      active[role]--
+    }
+  }
+
+  let app
+  let scanPromise
+  try {
+    app = mount()
+    const state = app.migration
+    state.credentials.source.authToken = 'source-token'
+    state.credentials.source.ct0 = 'source-csrf'
+    state.credentials.target.authToken = 'target-token'
+    state.credentials.target.ct0 = 'target-csrf'
+    await state.connect('source')
+    await state.connect('target')
+    scanPromise = state.scan()
+    let timeout
+    await Promise.race([
+      targetBookmarks,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Target bookmarks did not start')), 1000)
+      }),
+    ]).finally(() => clearTimeout(timeout))
+    assert.equal(active.source, 1)
+    assert.equal(maxTotal, 2)
+    assert.deepEqual(maxByRole, { source: 1, target: 1 })
+    releaseSourceFollowing()
+    await scanPromise
+    assert.equal(state.job.value.stage, 'ready')
+    assert.deepEqual(state.job.value.summary.following, { source: 2, alreadyThere: 1, toCopy: 1 })
+    assert.deepEqual(state.job.value.summary.bookmarks, { source: 1, alreadyThere: 0, toCopy: 1 })
+    assert.ok(events.indexOf('start target bookmarks') < events.indexOf('end source following'))
+  } finally {
+    releaseSourceFollowing()
+    await scanPromise
+    app?.unmount()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('completed partial transfer allows another batch without selecting copied items', async () => {
+  globalThis.sessionStorage = storage()
+  const originalFetch = globalThis.fetch
+  const third = {
+    id: '303',
+    label: 'Third',
+    detail: '@third',
+    url: 'https://x.com/third',
+    avatarUrl: null,
+  }
+  const sourceAccount = { ...source, followingCount: 3 }
+  const targetAccount = { ...target, followingCount: 0 }
+  const actions = []
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    if (url === '/api/connect')
+      return Response.json({
+        account: body.authToken === 'source-token' ? sourceAccount : targetAccount,
+      })
+    if (url === '/api/page')
+      return Response.json({
+        items: body.authToken === 'source-token' ? [first, second, third] : [],
+        cursor: null,
+      })
+    assert.equal(url, '/api/action')
+    actions.push([body.action, body.id])
+    return Response.json({ ok: true })
+  }
+
+  let app
+  try {
+    app = mount()
+    const state = app.migration
+    state.credentials.source.authToken = 'source-token'
+    state.credentials.source.ct0 = 'source-csrf'
+    state.credentials.target.authToken = 'target-token'
+    state.credentials.target.ct0 = 'target-csrf'
+    await state.connect('source')
+    await state.connect('target')
+    state.selected.bookmarks = false
+    await state.scan()
+    assert.equal(state.job.value.stage, 'ready')
+    state.toggleItem('following', '301')
+    await state.begin()
+    assert.equal(state.job.value.stage, 'completed')
+    assert.equal(state.canChooseItems.value, true)
+    assert.equal(state.remainingCount.value, 2)
+    assert.equal(state.chosenCount.value, 0)
+    assert.equal(state.previewItems.following.find((item) => item.id === '301').alreadyThere, true)
+    assert.deepEqual(state.job.value.summary.following, { source: 3, alreadyThere: 1, toCopy: 2 })
+
+    const saved = JSON.parse(sessionStorage.getItem('x-migrate.browser.v3'))
+    saved.chosenIds.following = ['301']
+    saved.job.summary.following = { source: 3, alreadyThere: 0, toCopy: 3 }
+    sessionStorage.setItem('x-migrate.browser.v3', JSON.stringify(saved))
+    app.unmount()
+    app = mount()
+    const restored = app.migration
+    assert.equal(restored.job.value.stage, 'completed')
+    assert.equal(restored.chosenCount.value, 0)
+    assert.deepEqual(restored.job.value.summary.following, {
+      source: 3,
+      alreadyThere: 1,
+      toCopy: 2,
+    })
+    restored.toggleItem('following', '301')
+    assert.equal(restored.chosenCount.value, 0)
+    restored.toggleItem('following', '302')
+    await restored.begin()
+    assert.equal(restored.job.value.stage, 'completed')
+    assert.equal(restored.remainingCount.value, 1)
+    assert.equal(restored.chosenCount.value, 0)
+    assert.deepEqual(restored.job.value.summary.following, {
+      source: 3,
+      alreadyThere: 2,
+      toCopy: 1,
+    })
+    assert.deepEqual(actions, [
+      ['follow', '301'],
+      ['follow', '302'],
+    ])
+  } finally {
+    app?.unmount()
     globalThis.fetch = originalFetch
   }
 })

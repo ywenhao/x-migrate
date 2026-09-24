@@ -40,7 +40,7 @@ Open <http://127.0.0.1:5199/>. For a production Node deployment, run `pnpm run b
 2. Connect both accounts. The curl input is cleared after parsing; the cookie fields are hidden after connection. The current tab keeps the cookie values, scan results, selections, and transfer progress in `sessionStorage` so it can resume after a refresh. Closing the tab clears that saved session.
 3. Choose follows, bookmarks, or both, then scan. A failed scan cannot start a transfer. Check the counts and preview, especially if X returns an uncertain end of list.
 4. Select the items to move. Existing destination items cannot be selected. If you also want to remove transferred items from the old account, select that option and type the old account's `@handle` to confirm.
-5. Start the transfer. You can stop it. On HTTP 429, the job waits until the time provided by X, or 15 minutes when none is provided; you can also resume or stop it manually.
+5. Start the transfer. You can stop it. On HTTP 429, the job waits until the time provided by X, or 15 minutes when none is provided; you can also resume or stop it manually. After a batch finishes, transferred items are marked as already present; select more remaining items to transfer another batch without scanning again.
 
 ## How it works
 

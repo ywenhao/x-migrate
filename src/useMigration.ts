@@ -72,6 +72,12 @@ export function useMigration() {
     ['scanning', 'running', 'paused'].includes(job.value?.stage || ''),
   )
   const chosenCount = computed(() => chosenIds.following.size + chosenIds.bookmarks.size)
+  const canChooseItems = computed(
+    () => job.value?.stage === 'ready' || job.value?.stage === 'completed',
+  )
+  const remainingCount = computed(
+    () => availableItems('following').length + availableItems('bookmarks').length,
+  )
   const previewComplete = computed(
     () =>
       !!job.value &&
@@ -159,6 +165,11 @@ export function useMigration() {
       }
       if (raw.plan?.entries && Number.isSafeInteger(raw.plan.index)) plan = raw.plan as TransferPlan
       if (!job.value) return
+      for (const kind of ['following', 'bookmarks'] as const) {
+        const availableIds = new Set(availableItems(kind).map((item) => item.id))
+        for (const id of chosenIds[kind]) if (!availableIds.has(id)) chosenIds[kind].delete(id)
+        if (job.value.stage === 'completed') updateSummary(kind)
+      }
       previewKind.value = job.value.selected.following ? 'following' : 'bookmarks'
       if (job.value.stage === 'scanning') {
         job.value.stage = 'failed'
@@ -400,7 +411,8 @@ export function useMigration() {
     error.value = ''
     busy.value = true
     cancelled = false
-    scanAbort = new AbortController()
+    const controller = new AbortController()
+    scanAbort = controller
     clearPreview()
     removeSource.following = false
     removeSource.bookmarks = false
@@ -408,32 +420,35 @@ export function useMigration() {
     job.value = newJob()
     try {
       persist()
-      for (const kind of ['following', 'bookmarks'] as const) {
-        if (!job.value.selected[kind]) continue
-        job.value.message = t(
-          kind === 'following' ? 'scanningSourceFollows' : 'scanningSourceBookmarks',
-        )
-        persist()
-        const source = await scanList('source', kind, scanAbort.signal)
-        if (cancelled) throw new Error(t('scanStopped'))
-        job.value.message = t(
-          kind === 'following' ? 'scanningTargetFollows' : 'scanningTargetBookmarks',
-        )
-        persist()
-        const target = await scanList('target', kind, scanAbort.signal)
-        if (cancelled) throw new Error(t('scanStopped'))
-        const targetIds = new Set(target.map((item) => item.id))
-        source.forEach((item) => {
-          item.alreadyThere = targetIds.has(item.id)
-        })
-        previewItems[kind] = source
-        const alreadyThere = source.filter((item) => item.alreadyThere).length
-        job.value.summary[kind] = {
-          source: source.length,
-          alreadyThere,
-          toCopy: source.length - alreadyThere,
+      const scanned: Record<MigrationKind, Record<Role, ItemView[] | null>> = {
+        following: { source: null, target: null },
+        bookmarks: { source: null, target: null },
+      }
+      async function scanAccount(role: Role): Promise<void> {
+        for (const kind of ['following', 'bookmarks'] as const) {
+          if (!job.value?.selected[kind]) continue
+          const items = await scanList(role, kind, controller.signal)
+          if (cancelled) throw new Error(t('scanStopped'))
+          scanned[kind][role] = items
+          const source = scanned[kind].source
+          const target = scanned[kind].target
+          if (!source || !target) continue
+          const targetIds = new Set(target.map((item) => item.id))
+          source.forEach((item) => {
+            item.alreadyThere = targetIds.has(item.id)
+          })
+          previewItems[kind] = source
+          updateSummary(kind)
+          persist()
         }
-        persist()
+      }
+      const scans = [scanAccount('source'), scanAccount('target')]
+      try {
+        await Promise.all(scans)
+      } catch (cause) {
+        controller.abort()
+        await Promise.allSettled(scans)
+        throw cause
       }
       if (cancelled) throw new Error(t('scanStopped'))
       const uncertain = (['following', 'bookmarks'] as const).some(
@@ -462,19 +477,25 @@ export function useMigration() {
   function availableItems(kind: MigrationKind): ItemView[] {
     return previewItems[kind].filter((item) => !item.alreadyThere)
   }
+  function updateSummary(kind: MigrationKind): void {
+    if (!job.value) return
+    const source = previewItems[kind].length
+    const toCopy = availableItems(kind).length
+    job.value.summary[kind] = { source, alreadyThere: source - toCopy, toCopy }
+  }
   function allChosen(kind: MigrationKind): boolean {
     const items = availableItems(kind)
     return items.length > 0 && items.every((item) => chosenIds[kind].has(item.id))
   }
   function toggleAll(kind: MigrationKind): void {
-    if (job.value?.stage !== 'ready') return
+    if (!canChooseItems.value) return
     const clear = allChosen(kind)
     for (const item of availableItems(kind))
       clear ? chosenIds[kind].delete(item.id) : chosenIds[kind].add(item.id)
     save()
   }
   function toggleItem(kind: MigrationKind, id: string): void {
-    if (job.value?.stage !== 'ready' || !availableItems(kind).some((item) => item.id === id)) return
+    if (!canChooseItems.value || !availableItems(kind).some((item) => item.id === id)) return
     chosenIds[kind].has(id) ? chosenIds[kind].delete(id) : chosenIds[kind].add(id)
     save()
   }
@@ -525,6 +546,8 @@ export function useMigration() {
         copied: (entry) => {
           const item = previewItems[entry.kind].find((value) => value.id === entry.id)
           if (item) item.alreadyThere = true
+          chosenIds[entry.kind].delete(entry.id)
+          updateSummary(entry.kind)
         },
         checkpoint: persist,
         failed: (entry, cause) => {
@@ -552,7 +575,11 @@ export function useMigration() {
       } else {
         job.value.stage = 'completed'
         job.value.message = t(
-          job.value.progress.failed ? 'transferCompleteWithFailures' : 'transferComplete',
+          job.value.progress.failed
+            ? 'transferCompleteWithFailures'
+            : remainingCount.value
+              ? 'transferBatchComplete'
+              : 'transferComplete',
         )
         plan = null
       }
@@ -571,7 +598,7 @@ export function useMigration() {
   async function begin(): Promise<void> {
     if (
       !job.value ||
-      job.value.stage !== 'ready' ||
+      !canChooseItems.value ||
       !chosenCount.value ||
       !previewComplete.value ||
       !removalConfirmed.value ||
@@ -581,6 +608,11 @@ export function useMigration() {
       return
     error.value = ''
     cancelled = false
+    const previousStage = job.value.stage
+    const previousProgress = { ...job.value.progress }
+    const previousErrors = [...job.value.errors]
+    const previousMessage = job.value.message
+    const previousRemoveSource = { ...job.value.removeSource }
     const entries: TransferEntry[] = []
     for (const kind of ['following', 'bookmarks'] as const) {
       if (!job.value.selected[kind]) continue
@@ -607,10 +639,15 @@ export function useMigration() {
     }
     job.value.stage = 'running'
     job.value.message = t('running')
+    job.value.errors = []
     try {
       persist()
     } catch (cause) {
-      job.value.stage = 'ready'
+      job.value.stage = previousStage
+      job.value.progress = previousProgress
+      job.value.errors = previousErrors
+      job.value.message = previousMessage
+      job.value.removeSource = previousRemoveSource
       plan = null
       showError(cause)
       return
@@ -696,6 +733,8 @@ export function useMigration() {
     sameAccount,
     taskActive,
     chosenCount,
+    canChooseItems,
+    remainingCount,
     previewComplete,
     wantsRemoval,
     removalConfirmed,

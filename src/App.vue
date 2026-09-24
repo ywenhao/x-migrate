@@ -27,6 +27,8 @@ const {
   sameAccount,
   taskActive,
   chosenCount,
+  canChooseItems,
+  remainingCount,
   previewComplete,
   wantsRemoval,
   removalConfirmed,
@@ -310,7 +312,7 @@ const {
                     type="checkbox"
                     :checked="allChosen(previewKind)"
                     :disabled="
-                      job.stage !== 'ready' ||
+                      !canChooseItems ||
                       loadingItems[previewKind] ||
                       !availableItems(previewKind).length
                     "
@@ -345,7 +347,7 @@ const {
                   type="checkbox"
                   :aria-label="t('selectItem', { label: item.label })"
                   :checked="chosenIds[previewKind].has(item.id)"
-                  :disabled="item.alreadyThere || job.stage !== 'ready'"
+                  :disabled="item.alreadyThere || !canChooseItems"
                   @change="toggleItem(previewKind, item.id)"
                 />
                 <a class="preview-link" :href="item.url" target="_blank" rel="noopener noreferrer"
@@ -370,11 +372,17 @@ const {
             </p>
           </div>
 
-          <div v-if="job.stage === 'ready'" class="execution-panel">
+          <div
+            v-if="canChooseItems && (job.stage === 'ready' || remainingCount > 0)"
+            class="execution-panel"
+          >
             <div>
               <h3>{{ t('cleanupHeading') }}</h3>
               <p>{{ t('cleanupHint') }}</p>
             </div>
+            <p v-if="job.stage === 'completed'" class="muted-note">
+              {{ t('remainingAfterTransfer', { count: remainingCount }) }}
+            </p>
             <p v-if="!selectionMatchesJob" class="inline-warning">{{ t('selectionChanged') }}</p>
             <p v-if="!chosenCount" class="inline-warning">{{ t('selectOne') }}</p>
             <div class="remove-options">
@@ -413,7 +421,15 @@ const {
                 "
                 @click="begin"
               >
-                {{ busy ? t('starting') : wantsRemoval ? t('confirmStart') : t('startTransfer') }}
+                {{
+                  busy
+                    ? t('starting')
+                    : wantsRemoval
+                      ? t('confirmStart')
+                      : job.stage === 'completed'
+                        ? t('continueTransferButton')
+                        : t('startTransfer')
+                }}
                 ({{ chosenCount }}) <span aria-hidden="true">→</span></button
               ><span class="muted-note">{{ t('cannotUndo') }}</span>
             </div>
