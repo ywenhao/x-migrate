@@ -16,13 +16,17 @@ function bodyObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 async function jsonBody(request: Request): Promise<Record<string, unknown>> {
-  try { return bodyObject(await request.json()) } catch { throw new Response(JSON.stringify({ error: 'Invalid request JSON.' }), { status: 400, headers: { 'content-type': 'application/json' } }) }
+  try { return bodyObject(await request.json()) } catch { throw new Error('Invalid request JSON.') }
 }
 function credentials(body: Record<string, unknown>) {
   return validateSessionInput(body.authToken, body.ct0)
 }
 
 const app = new Hono<{ Bindings: WorkerBindings }>()
+app.onError((error, c) => {
+  const status = error instanceof XApiError && error.status ? error.status : 400
+  return c.json({ error: message(error, locale(c)) }, status as 400 | 401 | 403 | 429 | 500)
+})
 app.use('/api/*', async (c, next) => {
   const origin = c.req.header('origin')
   if (origin && origin !== new URL(c.req.url).origin)
