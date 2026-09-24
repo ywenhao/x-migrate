@@ -24,7 +24,7 @@ pnpm run dev
 ## 网络和接口
 
 - 网络代理留空时依次使用 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、Windows 系统代理；也可手动填写 HTTP(S) 代理地址。填写 `direct` 可强制直连。
-- 工具会从 X 当前网页脚本发现 GraphQL 查询 ID。X 更新网页后若自动发现失败，可以在高级设置中手动填写 `Following`、`Bookmarks`、`CreateBookmark`、`DeleteBookmark` 的查询 ID。ID 位于对应 Network 请求 URL 的 `/graphql/` 后面。修改后请重新连接账号。
+- 工具会从 X 当前网页脚本发现 GraphQL 查询 ID。X 更新网页后若自动发现失败，可以在高级设置中手动填写 `UserByScreenName`、`Following`、`Bookmarks`、`CreateBookmark`、`DeleteBookmark` 的查询 ID。ID 位于对应 Network 请求 URL 的 `/graphql/` 后面。修改后请重新连接账号。
 - X 的网页接口可能变化或限制请求频率。工具会显示失败原因；遇到响应结构变化时会停止扫描，避免使用不完整列表执行迁移。
 - 迁移任务和会话只存在于本地进程内。重启服务后需重新连接和扫描。默认仅监听 `127.0.0.1`。
 

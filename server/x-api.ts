@@ -8,11 +8,11 @@ const X_ORIGIN = 'https://x.com'
 const ASSET_ORIGIN = 'https://abs.twimg.com'
 const BEARER =
   'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA'
-const OPERATIONS = new Set(['Following', 'Bookmarks', 'CreateBookmark', 'DeleteBookmark'])
+const OPERATIONS = new Set(['UserByScreenName', 'Following', 'Bookmarks', 'CreateBookmark', 'DeleteBookmark'])
 const DISCOVERY_TTL = 60 * 60 * 1000
 const MAX_PAGES = 500
 const MAX_ASSETS = 45
-// X 的完整 feature 快照有数百项。GraphQL 请求只发送这些时间线字段，
+// X 的完整 feature 快照有数百项。时间线请求只发送这些字段，
 // 避免 URL 超长，并减少过期 feature 对请求的影响。
 const FEATURE_KEYS = [
   'rweb_video_screen_enabled',
@@ -56,8 +56,26 @@ const FEATURE_KEYS = [
 const graphqlFeatures = Object.fromEntries(FEATURE_KEYS
   .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
   .map((key) => [key, (features as Record<string, unknown>)[key]]))
+const PROFILE_FEATURE_KEYS = [
+  'hidden_profile_subscriptions_enabled',
+  'profile_label_improvements_pcf_label_in_post_enabled',
+  'responsive_web_profile_redirect_enabled',
+  'rweb_tipjar_consumption_enabled',
+  'verified_phone_label_enabled',
+  'subscriptions_verification_info_is_identity_verified_enabled',
+  'subscriptions_verification_info_verified_since_enabled',
+  'highlights_tweets_tab_ui_enabled',
+  'responsive_web_twitter_article_notes_tab_enabled',
+  'subscriptions_feature_can_gift_premium',
+  'creator_subscriptions_tweet_preview_api_enabled',
+  'responsive_web_graphql_skip_user_profile_image_extensions_enabled',
+  'responsive_web_graphql_timeline_navigation_enabled',
+] as const
+const profileFeatures = Object.fromEntries(PROFILE_FEATURE_KEYS
+  .filter((key) => typeof (features as Record<string, unknown>)[key] === 'boolean')
+  .map((key) => [key, (features as Record<string, unknown>)[key]]))
 
-export type Operation = 'Following' | 'Bookmarks' | 'CreateBookmark' | 'DeleteBookmark'
+export type Operation = 'UserByScreenName' | 'Following' | 'Bookmarks' | 'CreateBookmark' | 'DeleteBookmark'
 export type QueryIds = Partial<Record<Operation, string>>
 
 export interface Account {
@@ -396,16 +414,50 @@ export class XClient {
   }
 
   async verify(): Promise<Account> {
-    const data = await this.json('GET', '/i/api/1.1/account/verify_credentials.json?include_entities=false&skip_status=true')
-    const id = string(asObject(data).id_str) || String(asObject(data).id ?? '')
-    const screenName = string(asObject(data).screen_name)
-    if (!id || !screenName) throw new XApiError('X 未返回账号身份，请检查会话是否有效。')
-    return {
-      id,
-      screenName,
-      name: string(asObject(data).name) || screenName,
-      avatarUrl: string(asObject(data).profile_image_url_https) || null,
+    // verify_credentials is no longer available to web cookie sessions.
+    const settings = await this.json('GET', '/i/api/1.1/account/settings.json')
+    const screenName = string(asObject(settings).screen_name) || string(asObject(settings).screenName)
+    if (!screenName) throw new XApiError('X 未返回账号用户名，请检查会话是否有效。')
+
+    const accountFrom = (value: unknown): Account | null => {
+      const user = asObject(value)
+      const id = string(user.rest_id) || string(user.id_str) || string(user.user_id) ||
+        (typeof user.id === 'number' && Number.isSafeInteger(user.id) ? String(user.id) : string(user.id))
+      const handle = string(at(user, 'core', 'screen_name')) ||
+        string(at(user, 'legacy', 'screen_name')) || string(user.screen_name) || string(user.screenName)
+      if (!id || handle.toLowerCase() !== screenName.toLowerCase()) return null
+      return {
+        id,
+        screenName: handle,
+        name: string(at(user, 'core', 'name')) || string(at(user, 'legacy', 'name')) ||
+          string(user.name) || handle,
+        avatarUrl: string(at(user, 'avatar', 'image_url')) ||
+          string(at(user, 'legacy', 'profile_image_url_https')) ||
+          string(user.profile_image_url_https) || null,
+      }
     }
+
+    const settingsAccount = accountFrom(settings)
+    if (settingsAccount) return settingsAccount
+
+    // The settings response often contains only screen_name. Try the small
+    // profile endpoint before loading X's scripts to discover a GraphQL ID.
+    try {
+      const user = await this.json('GET', `/i/api/1.1/users/show.json?screen_name=${encodeURIComponent(screenName)}`)
+      const account = accountFrom(user)
+      if (account) return account
+    } catch (error) {
+      if (!(error instanceof XApiError) || error.status === 429 ||
+        (error.status !== undefined && error.status >= 500)) throw error
+    }
+
+    const user = await this.graphqlGet('UserByScreenName',
+      { screen_name: screenName, withGrokTranslatedBio: true },
+      profileFeatures,
+      { withPayments: false, withAuxiliaryUserLabels: true })
+    const account = accountFrom(at(user, 'data', 'user', 'result'))
+    if (!account) throw new XApiError('X 已验证会话，但无法读取账号 ID，不能安全扫描关注列表。')
+    return account
   }
 
   private async text(url: string, authenticated: boolean): Promise<string> {
@@ -476,11 +528,17 @@ export class XClient {
     }
   }
 
-  private async graphqlGet(operation: Operation, variables: JsonObject): Promise<unknown> {
+  private async graphqlGet(
+    operation: Operation,
+    variables: JsonObject,
+    selectedFeatures: JsonObject = graphqlFeatures,
+    fieldToggles?: JsonObject,
+  ): Promise<unknown> {
     const params = new URLSearchParams({
       variables: JSON.stringify(variables),
-      features: JSON.stringify(graphqlFeatures),
+      features: JSON.stringify(selectedFeatures),
     })
+    if (fieldToggles) params.set('fieldToggles', JSON.stringify(fieldToggles))
     return await this.withOperation(operation, async (id) =>
       await this.json('GET', `/i/api/graphql/${id}/${operation}?${params}`))
   }
