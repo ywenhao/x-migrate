@@ -72,6 +72,10 @@ export function createApi(
   const allowedOrigin = publicOrigin ? new URL(publicOrigin).origin : null
 
   app.onError((error, context) => {
+    if (!(error instanceof ApiError) && !(error instanceof XApiError)) {
+      const detail = error instanceof Error ? `${error.name}: ${error.message}` : typeof error
+      console.error('Unexpected API error:', detail)
+    }
     const status =
       error instanceof ApiError
         ? error.status

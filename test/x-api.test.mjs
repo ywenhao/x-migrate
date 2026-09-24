@@ -49,6 +49,18 @@ test('query ID discovery stops at the requested operation and reuses downloaded 
   assert.equal(await client.operationId('Bookmarks'), 'bookmarks123')
   assert.deepEqual(calls, ['https://x.com/home', first, second])
 })
+
+test('X errors name the GraphQL operation without echoing request parameters', async () => {
+  const client = new XClient('fake', 'fake', {}, async () => new Response('{}', { status: 404 }))
+  await assert.rejects(
+    client.json('GET', '/i/api/graphql/invalidid/Viewer?variables=secret'),
+    (error) => {
+      assert.match(error.message, /Viewer 返回 404/)
+      assert.doesNotMatch(error.message, /secret/)
+      return true
+    },
+  )
+})
 test('解析 X 时间线中的用户、推文和底部分页游标', () => {
   const followingEntries = [
     {

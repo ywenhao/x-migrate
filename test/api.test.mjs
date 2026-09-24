@@ -55,7 +55,8 @@ test('Worker serves assets and shared API without a Node origin or secret', asyn
 test('Worker action uses the portable X client and passes session cookies only to X', async () => {
   const originalFetch = globalThis.fetch
   const calls = []
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async function (url, init) {
+    assert.equal(this, globalThis)
     calls.push({ url: String(url), init })
     if (String(url).endsWith('/home')) return new Response('', { status: 404 })
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })

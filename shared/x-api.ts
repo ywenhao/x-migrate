@@ -4,6 +4,7 @@ import features from './features.json' with { type: 'json' }
 import { readCompleteList } from './pagination.ts'
 
 export type Fetcher = (url: string, init?: RequestInit) => Promise<Response>
+const nativeFetch: Fetcher = (url, init) => globalThis.fetch(url, init)
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason)
@@ -422,7 +423,7 @@ export class XClient {
     private readonly authToken: string,
     private readonly ct0: string,
     private readonly overrides: QueryIds,
-    private readonly request: Fetcher = fetch,
+    private readonly request: Fetcher = nativeFetch,
     private readonly onClose: () => Promise<void> = async () => {},
   ) {}
 
@@ -430,7 +431,7 @@ export class XClient {
     authToken: string,
     ct0: string,
     overrides: QueryIds,
-    request: Fetcher = fetch,
+    request: Fetcher = nativeFetch,
     onClose: () => Promise<void> = async () => {},
   ): Promise<XClient> {
     return new XClient(authToken, ct0, overrides, request, onClose)
@@ -549,7 +550,9 @@ export class XClient {
     }
     if (response.status < 200 || response.status >= 300) {
       const detail = safeErrorMessage(parsed)
-      const endpoint = path.startsWith('/i/api/graphql/') ? path.split('/')[5] : path.split('?')[0]
+      const endpoint = path.startsWith('/i/api/graphql/')
+        ? path.split('?')[0].split('/').at(-1)
+        : path.split('?')[0]
       throw new XApiError(
         `X 接口 ${endpoint} 返回 ${response.status}${detail ? `：${detail}` : ''}`,
         response.status,
