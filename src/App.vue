@@ -1,9 +1,10 @@
 <script setup vapor lang="ts">
-import { computed, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import type { AccountView, ItemView, ItemsPage, JobView, MigrationKind } from './types'
 
 type Role = 'source' | 'target'
 interface Connection { sessionId: string; account: AccountView }
+const SESSION_STORAGE_KEY = 'x-migrate.session.v1'
 
 const credentials = reactive({
   source: { authToken: '', ct0: '' },
@@ -15,7 +16,7 @@ const curlInvalid = reactive<Record<Role, boolean>>({ source: false, target: fal
 const connections = reactive<Record<Role, Connection | null>>({ source: null, target: null })
 const connecting = ref<Role | null>(null)
 const proxy = ref('')
-const queryIds = reactive({ UserByScreenName: '', Following: '', Bookmarks: '', CreateBookmark: '', DeleteBookmark: '' })
+const queryIds = reactive({ Viewer: '', UserByScreenName: '', Following: '', Bookmarks: '', CreateBookmark: '', DeleteBookmark: '' })
 const selected = reactive({ following: true, bookmarks: true })
 const removeSource = reactive({ following: false, bookmarks: false })
 const removeConfirmation = ref('')
@@ -43,6 +44,18 @@ const percentage = computed(() => {
   return progress?.total ? Math.round(progress.processed / progress.total * 100) : 0
 })
 
+function persistSession(): void {
+  const saved = {
+    source: connections.source?.sessionId ?? null,
+    target: connections.target?.sessionId ?? null,
+    jobId: job.value?.id ?? null,
+  }
+  try {
+    if (saved.source || saved.target || saved.jobId) sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(saved))
+    else sessionStorage.removeItem(SESSION_STORAGE_KEY)
+  } catch { /* The app still works when browser storage is unavailable. */ }
+}
+
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method: body === undefined ? 'GET' : 'POST',
@@ -55,11 +68,53 @@ async function api<T>(path: string, body?: unknown): Promise<T> {
   return data
 }
 
+async function restoreSession(): Promise<void> {
+  let saved: Record<string, unknown>
+  try {
+    saved = JSON.parse(sessionStorage.getItem(SESSION_STORAGE_KEY) || 'null') as Record<string, unknown>
+  } catch { return }
+  if (!saved || typeof saved !== 'object') return
+
+  for (const role of ['source', 'target'] as const) {
+    const sessionId = saved[role]
+    if (typeof sessionId !== 'string' || !/^[a-f\d-]{36}$/.test(sessionId)) continue
+    try {
+      const connection = await api<Connection>(`/sessions/${sessionId}`)
+      if (!connections[role]) connections[role] = connection
+    } catch { /* The server process may have restarted or the session expired. */ }
+  }
+
+  const jobId = saved.jobId
+  if (connections.source && connections.target &&
+    connections.source.sessionId === saved.source && connections.target.sessionId === saved.target &&
+    typeof jobId === 'string' && /^[a-f\d-]{36}$/.test(jobId)) {
+    try {
+      const data = await api<{ job: JobView }>(`/jobs/${jobId}`)
+      if (!job.value && data.job.source.id === connections.source.account.id &&
+        data.job.target.id === connections.target.account.id) {
+        job.value = data.job
+        selected.following = data.job.selected.following
+        selected.bookmarks = data.job.selected.bookmarks
+        removeSource.following = data.job.removeSource.following
+        removeSource.bookmarks = data.job.removeSource.bookmarks
+        previewKind.value = data.job.selected.following ? 'following' : 'bookmarks'
+        if (data.job.stage === 'scanning' || data.job.stage === 'running') startPolling()
+        if (data.job.stage !== 'scanning') {
+          await Promise.all((['following', 'bookmarks'] as const)
+            .filter((kind) => data.job.selected[kind])
+            .map((kind) => loadItems(kind, true)))
+        }
+      }
+    } catch { /* An expired job can be scanned again. */ }
+  }
+  persistSession()
+}
+
 function showError(cause: unknown): void {
   error.value = cause instanceof Error ? cause.message : '发生未知错误。'
 }
 
-function parseCurl(role: Role): void {
+function parseCurl(role: Role): boolean {
   const command = curlInput[role].replace(/\\\r?\n/g, ' ')
   const options = /(?:^|\s)(-b|--cookie|-H|--header)(?:\s+|=)(?:'([^']*)'|"((?:\\.|[^"\\])*)"|(\S+))/gi
   credentials[role].authToken = ''
@@ -89,17 +144,19 @@ function parseCurl(role: Role): void {
       credentials[role].ct0 = ct0
       curlInput[role] = ''
       curlInvalid[role] = false
-      curlMessage[role] = '已提取 auth_token 和 ct0，请连接账号。'
-      return
+      curlMessage[role] = '已提取 auth_token 和 ct0。'
+      return true
     }
   }
 
   curlInvalid[role] = true
   curlMessage[role] = '未在 curl 的 Cookie 中同时找到 auth_token 和 ct0。'
+  return false
 }
 
 async function connect(role: Role): Promise<void> {
   error.value = ''
+  if (curlInput[role].trim() && !parseCurl(role)) return
   connecting.value = role
   try {
     const data = await api<{ sessionId: string; account: AccountView }>('/connect', {
@@ -113,6 +170,7 @@ async function connect(role: Role): Promise<void> {
     credentials[role].ct0 = ''
     curlMessage[role] = ''
     job.value = null
+    persistSession()
   } catch (cause) { showError(cause) }
   finally { connecting.value = null }
 }
@@ -126,6 +184,7 @@ async function disconnect(role: Role): Promise<void> {
     connections[role] = null
     job.value = null
     stopPolling()
+    persistSession()
   } catch (cause) { showError(cause) }
 }
 
@@ -140,6 +199,7 @@ async function poll(): Promise<void> {
   try {
     const previous = job.value.stage
     const data = await api<{ job: JobView }>(`/jobs/${job.value.id}`)
+    if (!job.value || job.value.id !== data.job.id || job.value.stage === 'cancelled') return
     job.value = data.job
     if (data.job.stage === 'ready' && previous !== 'ready') {
       stopPolling()
@@ -157,7 +217,7 @@ async function poll(): Promise<void> {
 
 function startPolling(): void {
   stopPolling()
-  timer = setInterval(() => { void poll() }, 1100)
+  timer = setInterval(() => { void poll() }, 2500)
   void poll()
 }
 
@@ -179,6 +239,7 @@ async function scan(): Promise<void> {
     })
     job.value = data.job
     previewKind.value = selected.following ? 'following' : 'bookmarks'
+    persistSession()
     startPolling()
   } catch (cause) { showError(cause) }
   finally { busy.value = false }
@@ -217,9 +278,11 @@ async function cancel(): Promise<void> {
   try {
     const data = await api<{ job: JobView }>(`/jobs/${job.value.id}/cancel`, {})
     job.value = data.job
+    if (data.job.stage === 'cancelled') stopPolling()
   } catch (cause) { showError(cause) }
 }
 
+onMounted(() => { void restoreSession() })
 onUnmounted(stopPolling)
 </script>
 
@@ -251,7 +314,7 @@ onUnmounted(stopPolling)
       </div>
 
       <section class="section" aria-labelledby="connection-heading">
-        <div class="section-heading"><span class="section-number">01</span><div><h2 id="connection-heading">连接两个账号</h2><p>分别粘贴 X 请求的 curl 自动提取 Cookie，或手动填写 <code>auth_token</code> 和 <code>ct0</code>。</p></div></div>
+        <div class="section-heading"><span class="section-number">01</span><div><h2 id="connection-heading">连接两个账号</h2><p>粘贴 X 请求的 curl 后可直接连接，或手动填写 <code>auth_token</code> 和 <code>ct0</code>。</p></div></div>
         <div class="account-grid">
           <article class="account-card">
             <div class="card-top"><span class="account-role">来源账号</span><span class="account-tag source-tag">旧账号</span></div>
@@ -271,9 +334,9 @@ onUnmounted(stopPolling)
               <p v-if="curlMessage.source" :class="['curl-message', { invalid: curlInvalid.source }]" role="status">{{ curlMessage.source }}</p>
               <div class="field-divider">或手动填写</div>
               <label for="source-auth">auth_token</label>
-              <input id="source-auth" v-model="credentials.source.authToken" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴旧账号 auth_token" required>
+              <input id="source-auth" v-model="credentials.source.authToken" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴旧账号 auth_token" :required="!curlInput.source.trim()">
               <label for="source-ct0">ct0</label>
-              <input id="source-ct0" v-model="credentials.source.ct0" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴旧账号 ct0" required>
+              <input id="source-ct0" v-model="credentials.source.ct0" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴旧账号 ct0" :required="!curlInput.source.trim()">
               <button class="button button-dark full" type="submit" :disabled="connecting !== null">{{ connecting === 'source' ? '正在验证…' : '连接旧账号' }}</button>
             </form>
           </article>
@@ -298,9 +361,9 @@ onUnmounted(stopPolling)
               <p v-if="curlMessage.target" :class="['curl-message', { invalid: curlInvalid.target }]" role="status">{{ curlMessage.target }}</p>
               <div class="field-divider">或手动填写</div>
               <label for="target-auth">auth_token</label>
-              <input id="target-auth" v-model="credentials.target.authToken" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新账号 auth_token" required>
+              <input id="target-auth" v-model="credentials.target.authToken" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新账号 auth_token" :required="!curlInput.target.trim()">
               <label for="target-ct0">ct0</label>
-              <input id="target-ct0" v-model="credentials.target.ct0" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新账号 ct0" required>
+              <input id="target-ct0" v-model="credentials.target.ct0" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴新账号 ct0" :required="!curlInput.target.trim()">
               <button class="button button-dark full" type="submit" :disabled="connecting !== null">{{ connecting === 'target' ? '正在验证…' : '连接新账号' }}</button>
             </form>
           </article>

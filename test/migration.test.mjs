@@ -180,3 +180,54 @@ test('目标账号新增失败时不移除对应旧账号关注', async () => {
   assert.ok(!actions.includes('source:unfollow:301'))
   assert.ok(actions.includes('source:unfollow:302'))
 })
+
+test('刷新可读取会话，停止扫描会立即中断当前读取', async () => {
+  const originalFollowing = sourceClient.following
+  let signalReceived
+  const started = new Promise((resolve) => { signalReceived = resolve })
+  let aborted = false
+  sourceClient.following = async (_account, _onPage, signal) => {
+    signalReceived()
+    await new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        aborted = true
+        reject(new Error('scan aborted'))
+      }, { once: true })
+    })
+    return []
+  }
+
+  try {
+    const source = await post('/connect', { authToken: 'source1234', ct0: 'sourcecsrf' })
+    const target = await post('/connect', { authToken: 'target1234', ct0: 'targetcsrf' })
+    const restored = await fetch(`${base}/api/sessions/${source.data.sessionId}`)
+    assert.equal(restored.status, 200)
+    assert.deepEqual((await restored.json()).account, sourceAccount)
+
+    const scan = await post('/scan', {
+      sourceSessionId: source.data.sessionId,
+      targetSessionId: target.data.sessionId,
+      following: true,
+      bookmarks: false,
+    })
+    await started
+    const stopped = await post(`/jobs/${scan.data.job.id}/cancel`, {})
+    assert.equal(stopped.status, 200)
+    assert.equal(stopped.data.job.stage, 'cancelled')
+    assert.equal(aborted, true)
+  } finally {
+    sourceClient.following = originalFollowing
+  }
+})
+
+test('连续无新增项目时安全停止分页', async () => {
+  const client = new XClient('fake', 'fake', {}, {})
+  let page = 0
+  client.graphqlGet = async () => ({
+    data: { user: { result: { timeline: { timeline: {
+      instructions: [{ entries: [{ content: { cursorType: 'Bottom', value: `cursor-${++page}` } }] }],
+    } } } } },
+  })
+  await assert.rejects(() => client.following(sourceAccount), /连续 10 页未返回新的关注项目/)
+  assert.equal(page, 10)
+})

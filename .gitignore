@@ -19,3 +19,4 @@ dist
 
 # 抓取缓存（如有）
 /tmp
+.playwright-mcp/

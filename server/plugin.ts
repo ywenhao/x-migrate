@@ -36,6 +36,7 @@ interface Job {
   progress: JobProgress
   errors: string[]
   cancelled: boolean
+  scanAbort: AbortController | null
   touchedAt: number
 }
 
@@ -152,6 +153,7 @@ function jobError(job: Job, error: unknown): void {
 }
 
 async function scan(job: Job, source: Session, target: Session): Promise<void> {
+  const signal = job.scanAbort!.signal
   try {
     for (const kind of ['following', 'bookmarks'] as const) {
       if (!job.selected[kind]) continue
@@ -159,14 +161,14 @@ async function scan(job: Job, source: Session, target: Session): Promise<void> {
       const label = kind === 'following' ? '关注' : '收藏'
       job.message = `正在读取旧账号${label}…`
       const sourceItems = kind === 'following'
-        ? await source.client.following(source.account, (count) => { job.message = `已读取旧账号${label} ${count} 项…` })
-        : await source.client.bookmarks((count) => { job.message = `已读取旧账号${label} ${count} 项…` })
+        ? await source.client.following(source.account, (count, page) => { job.message = `已读取旧账号${label} ${count} 项（第 ${page} 页）…` }, signal)
+        : await source.client.bookmarks((count, page) => { job.message = `已读取旧账号${label} ${count} 项（第 ${page} 页）…` }, signal)
       job.data[kind].source = sourceItems
       if (cancelCheck(job)) return
       job.message = `正在读取新账号${label}，用于跳过已有内容…`
       const targetItems = kind === 'following'
-        ? await target.client.following(target.account, (count) => { job.message = `已读取新账号${label} ${count} 项…` })
-        : await target.client.bookmarks((count) => { job.message = `已读取新账号${label} ${count} 项…` })
+        ? await target.client.following(target.account, (count, page) => { job.message = `已读取新账号${label} ${count} 项（第 ${page} 页）…` }, signal)
+        : await target.client.bookmarks((count, page) => { job.message = `已读取新账号${label} ${count} 项（第 ${page} 页）…` }, signal)
       job.data[kind].targetIds = new Set(targetItems.map((item) => item.id))
       job.data[kind].initialTargetIds = new Set(job.data[kind].targetIds)
     }
@@ -174,8 +176,9 @@ async function scan(job: Job, source: Session, target: Session): Promise<void> {
     job.stage = 'ready'
     job.message = '扫描完成。请核对数量和预览，再决定是否开始迁移。'
   } catch (error) {
-    jobError(job, error)
+    if (!cancelCheck(job)) jobError(job, error)
   } finally {
+    job.scanAbort = null
     if (activeJobId === job.id) activeJobId = null
   }
 }
@@ -286,6 +289,13 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       return
     }
 
+    const sessionMatch = url.pathname.match(/^\/api\/sessions\/([a-f\d-]{36})$/)
+    if (method === 'GET' && sessionMatch) {
+      const session = getSession(sessionMatch[1])
+      respond(response, 200, { sessionId: session.id, account: session.account })
+      return
+    }
+
     if (method === 'POST' && url.pathname === '/api/disconnect') {
       const body = await readBody(request)
       const session = getSession(body.sessionId)
@@ -326,6 +336,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         progress: { processed: 0, total: 0, copied: 0, alreadyThere: 0, removed: 0, failed: 0 },
         errors: [],
         cancelled: false,
+        scanAbort: new AbortController(),
         touchedAt: Date.now(),
       }
       jobs.set(job.id, job)
@@ -353,8 +364,14 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
         return
       }
       if (method === 'POST' && action === 'cancel') {
-        if (job.stage === 'scanning' || job.stage === 'running') job.cancelled = true
-        else if (job.stage === 'ready') {
+        if (job.stage === 'scanning') {
+          job.cancelled = true
+          cancelCheck(job)
+          job.scanAbort?.abort()
+        } else if (job.stage === 'running') {
+          job.cancelled = true
+          job.message = '正在停止，等待当前 X 操作结束…'
+        } else if (job.stage === 'ready') {
           job.cancelled = true
           cancelCheck(job)
         }
