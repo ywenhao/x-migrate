@@ -36,7 +36,7 @@ Open <http://127.0.0.1:5199/>. For a production Node deployment, run `pnpm run b
 
 ## Transfer safely
 
-1. Sign in to the old and new X accounts in separate browser profiles or sessions. For each account, copy an authenticated X request **as curl** from the browser's Network panel and paste it into the matching form. You can also copy the **values** of `auth_token` and `ct0` from Application → Cookies → `https://x.com`.
+1. Sign in to the old and new X accounts in separate browser profiles or sessions. In each Chrome browser, open DevTools → Network, right-click an authenticated X request, and choose Copy → Copy as cURL (bash). Paste the complete copied command into the matching account form. You can also copy the **values** of `auth_token` and `ct0` from Application → Cookies → `https://x.com`.
 2. Connect both accounts. The curl input is cleared after parsing; the cookie fields are hidden after connection. The current tab keeps the cookie values, scan results, selections, and transfer progress in `sessionStorage` so it can resume after a refresh. Closing the tab clears that saved session.
 3. Choose follows, bookmarks, or both, then scan. A failed scan cannot start a transfer. Check the counts and preview, especially if X returns an uncertain end of list. After scanning, the two refresh buttons reread follows or bookmarks on both accounts without replacing the other list. The matching summary card shows read / total for each account while refreshing; bookmarks show `?` until the total is known.
 4. Select the items to move. Existing destination items cannot be selected. If you also want to remove transferred items from the old account, select that option and type the old account's `@handle` to confirm.
